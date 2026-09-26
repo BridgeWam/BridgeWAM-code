@@ -2,11 +2,11 @@
 set -euo pipefail
 
 ROOT_DIR=${ROOT_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}
-BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-${FASTWAM_PYTHON:-"/root/miniforge/envs/fastwam/bin/python"}}
+BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-${FASTWAM_PYTHON:-"$(command -v python)"}}
 FASTWAM_PYTHON="$BRIDGEWAM_PYTHON"
 
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/LIBERO-plus:$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
-export DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH:-"/mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/checkpoints"}
+export DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH:-"$ROOT_DIR/checkpoints"}
 export DIFFSYNTH_SKIP_DOWNLOAD=${DIFFSYNTH_SKIP_DOWNLOAD:-true}
 export MUJOCO_GL=${MUJOCO_GL:-egl}
 export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-egl}
@@ -56,7 +56,7 @@ fi
 if [ -n "$output_override" ]; then
     STAGE1_OUTPUT_DIR=$output_override
 else
-    STAGE1_OUTPUT_DIR=${STAGE1_OUTPUT_DIR:-"/mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/env_result/libero-plus/$task_name/stage1_${stage1_scope}_$(date +%Y%m%d_%H%M%S)"}
+    STAGE1_OUTPUT_DIR=${STAGE1_OUTPUT_DIR:-"$ROOT_DIR/runs/eval/libero-plus/$task_name/stage1_${stage1_scope}_$(date +%Y%m%d_%H%M%S)"}
     manager_args+=("EVALUATION.output_dir=$STAGE1_OUTPUT_DIR")
 fi
 

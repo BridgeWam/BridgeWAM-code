@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEFAULT_TRAIN_OUTPUT_BASE="/mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/training-result-729-exp3-v2"
+DEFAULT_TRAIN_OUTPUT_BASE="${PROJECT_ROOT}/runs/train"
 
 is_true() {
   case "$1" in
@@ -150,7 +150,7 @@ fi
 NPROC_PER_NODE="${1:?Usage: bash scripts/train_zero1.sh <nproc_per_node> [hydra_overrides...]}"
 shift
 
-MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-/mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/checkpoints}"
+MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-${PROJECT_ROOT}/checkpoints}"
 ACTION_DIT_PRETRAINED_PATH="${ACTION_DIT_PRETRAINED_PATH:-${MODEL_BASE_PATH}/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt}"
 TRAIN_OUTPUT_BASE="${BRIDGEWAM_TRAIN_OUTPUT_BASE:-${FASTWAM_TRAIN_OUTPUT_BASE:-${DEFAULT_TRAIN_OUTPUT_BASE}}}"
 WAN_MODEL_DIR="${MODEL_BASE_PATH}/Wan-AI/Wan2.2-TI2V-5B"

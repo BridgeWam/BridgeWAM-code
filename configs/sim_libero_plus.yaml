@@ -17,7 +17,7 @@ EVALUATION:
   task_suite_name: libero_spatial
   task_id: 0
   num_trials: 1
-  output_dir: /mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/env_result/libero-plus/${hydra:runtime.choices.task}/${now:%Y%m%d_%H%M%S}
+  output_dir: ./runs/eval/libero-plus/${hydra:runtime.choices.task}/${now:%Y%m%d_%H%M%S}
 
   env_num: 1
   num_steps_wait: 30

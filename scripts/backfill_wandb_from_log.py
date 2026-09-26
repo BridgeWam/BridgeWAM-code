@@ -80,12 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("log_path", type=Path, help="Path to train.log")
     parser.add_argument(
         "--entity",
-        default="jxf_coco-fudan-university-school-of-management",
-        help="W&B entity/workspace",
+        default=None,
+        help="W&B entity/workspace; defaults to the locally configured account",
     )
     parser.add_argument(
         "--project",
-        default="more-FastWAM-exp1-drop00-05",
+        default="bridgewam",
         help="W&B project name",
     )
     parser.add_argument("--name", default="train-log-backfill", help="Name of the new W&B run")
@@ -165,4 +165,4 @@ if __name__ == "__main__":
 
 
 #   python scripts/backfill_wandb_from_log.py train.log \
-#     --name exp1-drop00-05-loss-backfill
+#     --name training-loss-backfill

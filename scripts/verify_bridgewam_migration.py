@@ -104,7 +104,8 @@ for kind, cls in [('baseline', FastWAM), ('lbq', FastWAM),
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--reference', default='1fc36bff9e78a176ad5d0cfdd5e73ef1af29f97c')
+    parser.add_argument('--reference', required=True,
+                        help='Reference commit or branch in a local repository with history.')
     parser.add_argument('--check', choices=['training', 'weights'], default='training',
                         help='Use weights for a reference branch with different training semantics.')
     args = parser.parse_args()

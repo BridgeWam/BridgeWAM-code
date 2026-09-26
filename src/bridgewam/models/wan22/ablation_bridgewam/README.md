@@ -18,8 +18,8 @@ access in its joint attention mask. Checkpoints carry a strict
 
 ## Frozen Video initialization
 
-The Frozen Video task defaults to the release checkpoint at its original server
-path. Override that path with:
+The Frozen Video task defaults to
+`./checkpoints/fastwam_release/libero_uncond_2cam224.pt`. Override that path with:
 
 ```bash
 export BRIDGEWAM_RELEASE_CKPT=/path/to/libero_uncond_2cam224.pt
@@ -70,7 +70,7 @@ Frozen Video and LBQ-K/V MoT use the standard action-only LIBERO inference entry
 ## Verification in the full repository
 
 The root `tests` directory is intentionally excluded from this source export.
-Run the following only from the full repository at the pinned commit, using an
+Run the following only from a full repository containing those tests, using an
 environment with the test dependencies installed:
 
 ```bash

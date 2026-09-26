@@ -141,8 +141,9 @@ python experiments/libero-pro/eval_libero_pro_single.py \
 - `manager_runtime.json`: start/end times, base Git commit when available, checkpoint path and worker exit codes.
 - `summary.json`: overall, base-suite, perturbation and 20 combination summaries.
 
-This export contains no Git history, so the runtime's Git commit field may be null.
-The source commit is recorded in the root README.
+When running from a source archive without Git metadata, the runtime's Git commit
+field may be null. Do not include identifying local paths or Git metadata when
+sharing run artifacts for anonymous review.
 
 Success rates aggregate total successful episodes divided by total evaluated
 episodes. Missing tasks mark a run incomplete; duplicate results or mismatched task

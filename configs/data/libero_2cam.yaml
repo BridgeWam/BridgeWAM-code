@@ -1,10 +1,10 @@
 train:
   _target_: bridgewam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
-    - /mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/data/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
-    - /mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/data/libero_mujoco3.3.2/libero_object_no_noops_lerobot
-    - /mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
-    - /mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/data/libero_mujoco3.3.2/libero_10_no_noops_lerobot
+    - ./data/libero_mujoco3.3.2/libero_spatial_no_noops_lerobot
+    - ./data/libero_mujoco3.3.2/libero_object_no_noops_lerobot
+    - ./data/libero_mujoco3.3.2/libero_goal_no_noops_lerobot
+    - ./data/libero_mujoco3.3.2/libero_10_no_noops_lerobot
   shape_meta:
     images:
       - key: image

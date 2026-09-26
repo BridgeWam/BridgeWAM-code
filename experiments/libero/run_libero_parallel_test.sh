@@ -26,19 +26,19 @@ run_libero_eval() {
     export OUTPUT_DIR  # Use run_id as the output subdirectory
     SESSION_NAME=${LIBERO_TMUX_SESSION_NAME:-"libero_${RUN_ID}_$$"}
     SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -c '[:alnum:]_.-' '_')
-    LIBERO_GPU_LOCK_DIR=${LIBERO_GPU_LOCK_DIR:-"/root/workspace/.fastwam_runtime/libero_gpu_locks"}
+    LIBERO_GPU_LOCK_DIR=${LIBERO_GPU_LOCK_DIR:-"${XDG_RUNTIME_DIR:-$HOME/.cache}/bridgewam/libero_gpu_locks"}
     MANAGER_RUNTIME_FILE="$OUTPUT_DIR/manager_runtime.txt"
     SESSION_CREATED=0
     GPU_LOCK_FDS=()
     EXP_NAME=${EXP_NAME:-""}
     export EXP_NAME
-    BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-${FASTWAM_PYTHON:-"/root/miniforge/envs/fastwam/bin/python"}}
+    BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-${FASTWAM_PYTHON:-"$(command -v python)"}}
     FASTWAM_PYTHON="$BRIDGEWAM_PYTHON"
-    LIBERO_ROOT=${LIBERO_ROOT:-"/root/workspace/FastWAM/LIBERO"}
+    LIBERO_ROOT=${LIBERO_ROOT:-"$ROOT_DIR/LIBERO"}
     EVAL_SCRIPT=${EVAL_SCRIPT:-"experiments/libero/eval_libero_single.py"}
     SUMMARY_SCRIPT=${SUMMARY_SCRIPT:-"experiments/libero/summarize_results.py"}
     LIBERO_CONFIG_PATH=${LIBERO_CONFIG_PATH:-"$HOME/.libero"}
-    DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH:-"/mnt/pfs/6ry0zr/mnt/jxfang/FastWAN/checkpoints"}
+    DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH:-"$ROOT_DIR/checkpoints"}
     DIFFSYNTH_SKIP_DOWNLOAD=${DIFFSYNTH_SKIP_DOWNLOAD:-"true"}
     MUJOCO_GL=${MUJOCO_GL:-"egl"}
     PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"egl"}
