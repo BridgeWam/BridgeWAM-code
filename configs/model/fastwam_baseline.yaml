@@ -1,0 +1,5 @@
+# Explicit historical FastWAM topology. The factory resets LBQ/routing/head overrides.
+defaults:
+  - bridgewam
+  - _self_
+_target_: bridgewam.runtime.create_fastwam_baseline

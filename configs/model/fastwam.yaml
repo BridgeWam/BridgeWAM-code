@@ -1,0 +1,4 @@
+# Legacy config name; architecture defaults are preserved.
+defaults:
+  - bridgewam
+  - _self_

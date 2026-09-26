@@ -1,0 +1,63 @@
+# Python caches and generated binaries
+__pycache__/
+*.py[cod]
+*.so
+*.dylib
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environments, builds and editor files
+/.venv/
+/venv/
+/env/
+/build/
+/dist/
+/.idea/
+/.vscode/
+/.codex/
+/.claude/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# External benchmarks and non-source project material
+/LIBERO/
+/LIBERO-plus/
+/LIBERO-PRO/
+/attn_map/
+/video_action_causal_attribution/
+/output/
+/outputs/
+/research/
+/layer28-story-site/
+/metaquery/
+
+# Downloaded data, weights and generated training/evaluation results
+/data/
+/checkpoints/
+/runs/
+/evaluate_results/
+/results/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.log
+.deepspeed*
+
+# Other third-party trees are external; retain the selected RoboTwin snapshot
+/third_party/*
+!/third_party/RoboTwin/
+
+# Local credentials
+.env
+.env.*
+!.env.example
+*.secret
+credentials
