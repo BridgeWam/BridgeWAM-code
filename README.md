@@ -1,5 +1,7 @@
 # BridgeWAM
 
+![BridgeWAM overview](bridgewam-teaser.png)
+
 BridgeWAM connects pretrained video and action experts through Latent Bridge
 Queries (LBQs). This source distribution contains the model implementation,
 training and evaluation entrypoints, task configurations, and regression tests.
