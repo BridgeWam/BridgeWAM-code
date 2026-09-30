@@ -13,11 +13,11 @@ from .models import (
     FrozenVideoBridgeWAM,
     LBQKVMoTBridgeWAM,
 )
-from .mot_variants import (
-    FrozenVideoAblationMoT,
-    FullVideoLBQAblationMoT,
-    JointLBQAblationMoT,
-    TaggedAblationMoT,
+from .backbones import (
+    FrozenVideoBridge,
+    FullVideoBridge,
+    JointAttentionBridge,
+    AblationBridge,
 )
 
 
@@ -49,9 +49,13 @@ def _validate_topology(
     lbq_config: dict[str, Any],
 ) -> None:
     if not bool(lbq_config.get("enabled", False)):
-        raise ValueError("Every BridgeWAM ablation requires Video Latent Bridge Queries.")
+        raise ValueError(
+            "Every BridgeWAM ablation requires Video Latent Bridge Queries."
+        )
     if int(lbq_config.get("num_lbqs", 0)) != 32:
-        raise ValueError("These ablations are defined for exactly 32 Latent Bridge Queries tokens.")
+        raise ValueError(
+            "These ablations are defined for exactly 32 Latent Bridge Queries tokens."
+        )
     if bool(lbq_config.get("preserve_direct_video_kv", True)):
         raise ValueError("Ablations must not use the legacy raw Video K/V cache.")
 
@@ -65,7 +69,9 @@ def _validate_topology(
             f"BridgeWAM ablations require the original 30-layer Video DiT, got {video_layers}."
         )
     if int(lbq_config.get("start_layer", -1)) != 0:
-        raise ValueError("BridgeWAM ablations require `latent_bridge_queries.start_layer=0`.")
+        raise ValueError(
+            "BridgeWAM ablations require `latent_bridge_queries.start_layer=0`."
+        )
     readout_layer = int(lbq_config.get("readout_layer", -1))
     if readout_layer < 0:
         readout_layer += video_layers
@@ -106,7 +112,7 @@ def _validate_topology(
         if not bool(lbq_config.get("freeze_video_expert", False)):
             raise ValueError("Frozen-Video ablation must freeze the Video expert.")
     elif bool(lbq_config.get("freeze_video_expert", True)):
-        raise ValueError(f"Ablation {ablation_type} requires full MoT training.")
+        raise ValueError(f"Ablation {ablation_type} requires full expert finetuning.")
 
 
 def _checkpoint_identity(
@@ -130,9 +136,7 @@ def _checkpoint_identity(
     if ablation_type == "idm":
         return {
             "type": ablation_type,
-            "video_cond_noise_prob": float(
-                ablation.get("video_cond_noise_prob", 0.5)
-            ),
+            "video_cond_noise_prob": float(ablation.get("video_cond_noise_prob", 0.5)),
             "action_route": "full_video_lbq_only",
         }
     return {
@@ -159,7 +163,7 @@ def create_bridgewam_ablation(
     video_scheduler=None,
     action_scheduler=None,
     loss=None,
-    mot_checkpoint_mixed_attn: bool = True,
+    checkpoint_attention: bool = True,
     redirect_common_files: bool = True,
     model_dtype: torch.dtype = torch.bfloat16,
     device: str = "cuda",
@@ -170,13 +174,15 @@ def create_bridgewam_ablation(
     )
     lbq_config = _as_dict(latent_bridge_queries, name="latent_bridge_queries")
     ablation_config = _as_dict(ablation, name="ablation")
-    video_scheduler = _as_dict(
-        video_scheduler, name="video_scheduler", required=False
-    )
+    video_scheduler = _as_dict(video_scheduler, name="video_scheduler", required=False)
     action_scheduler = _as_dict(action_scheduler, name="action_scheduler")
     loss = _as_dict(loss, name="loss", required=False)
-    if float(loss.get("lambda_lbq_spectral", 0.0)) != 0 or loss.get("lbq_spectral_diagnostics", False):
-        raise ValueError("LBQ spectral loss/diagnostics currently require the main create_bridgewam factory.")
+    if float(loss.get("lambda_lbq_spectral", 0.0)) != 0 or loss.get(
+        "lbq_spectral_diagnostics", False
+    ):
+        raise ValueError(
+            "LBQ spectral loss/diagnostics currently require the main create_bridgewam factory."
+        )
 
     ablation_type = str(ablation_config.get("type", ""))
     if ablation_type not in ABLATION_TYPES:
@@ -228,30 +234,27 @@ def create_bridgewam_ablation(
 
     common_mot_kwargs = {
         "mixtures": {"video": video_expert, "action": action_expert},
-        "mot_checkpoint_mixed_attn": bool(mot_checkpoint_mixed_attn),
+        "checkpoint_attention": bool(checkpoint_attention),
         "latent_bridge_queries": lbq_config,
         "ablation_type": ablation_type,
     }
     if ablation_type == "frozen_video_action_reader":
-        mot = FrozenVideoAblationMoT(
-            action_video_kv_routing=None,
+        mot = FrozenVideoBridge(
             **common_mot_kwargs,
         )
         model_class = FrozenVideoBridgeWAM
     elif ablation_type == "lbq_kv_mot":
-        mot = TaggedAblationMoT(
-            action_video_kv_routing=None,
+        mot = AblationBridge(
             **common_mot_kwargs,
         )
         model_class = LBQKVMoTBridgeWAM
     elif ablation_type == "idm":
-        mot = FullVideoLBQAblationMoT(
-            action_video_kv_routing=None,
+        mot = FullVideoBridge(
             **common_mot_kwargs,
         )
         model_class = BridgeWAMIDMAblation
     else:
-        mot = JointLBQAblationMoT(**common_mot_kwargs)
+        mot = JointAttentionBridge(**common_mot_kwargs)
         model_class = BridgeWAMJointAblation
 
     identity = _checkpoint_identity(
@@ -262,7 +265,7 @@ def create_bridgewam_ablation(
     model = model_class(
         video_expert=video_expert,
         action_expert=action_expert,
-        mot=mot,
+        bridge=mot,
         vae=components.vae,
         text_encoder=components.text_encoder,
         tokenizer=components.tokenizer,
@@ -272,9 +275,7 @@ def create_bridgewam_ablation(
         torch_dtype=model_dtype,
         video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
         video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
-        video_num_train_timesteps=int(
-            video_scheduler.get("num_train_timesteps", 1000)
-        ),
+        video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
         action_train_shift=float(action_scheduler.get("train_shift", 5.0)),
         action_infer_shift=float(action_scheduler.get("infer_shift", 5.0)),
         action_num_train_timesteps=int(
@@ -305,6 +306,4 @@ def create_bridgewam_ablation(
             )
         model.load_release_video_and_proprio(str(release_path))
         model.model_paths["frozen_bridgewam_release"] = str(release_path)
-        # Preserve the historical metadata key for downstream reports.
-        model.model_paths["frozen_fastwam_release"] = str(release_path)
     return model

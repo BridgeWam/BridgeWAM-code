@@ -5,7 +5,7 @@ tokenizer_max_len: 128
 load_text_encoder: false
 proprio_dim: ${data.train.processor.proprio_output_dim}
 redirect_common_files: true
-mot_checkpoint_mixed_attn: true
+checkpoint_attention: true
 
 ablation:
   type: lbq_kv_mot
@@ -48,7 +48,7 @@ video_dit_config:
   require_clip_embedding: false
   require_vae_embedding: false
   fuse_vae_embedding_in_latents: true
-  use_gradient_checkpointing: ${model.mot_checkpoint_mixed_attn}
+  use_gradient_checkpointing: ${model.checkpoint_attention}
   video_attention_mask_mode: first_frame_causal
   action_conditioned: false
   action_dim: ${data.train.processor.action_output_dim}
@@ -64,7 +64,7 @@ action_dit_config:
   text_dim: 4096
   freq_dim: 256
   eps: 1.0e-6
-  use_gradient_checkpointing: ${model.mot_checkpoint_mixed_attn}
+  use_gradient_checkpointing: ${model.checkpoint_attention}
   architecture: alternating_cross_self
   add_pos_embed: true
   max_action_horizon: 1024

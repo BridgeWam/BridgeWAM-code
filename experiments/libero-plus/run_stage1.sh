@@ -2,8 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR=${ROOT_DIR:-"$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"}
-BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-${FASTWAM_PYTHON:-"$(command -v python)"}}
-FASTWAM_PYTHON="$BRIDGEWAM_PYTHON"
+BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-"$(command -v python)"}
 
 export PYTHONPATH="$ROOT_DIR/src:$ROOT_DIR/LIBERO-plus:$ROOT_DIR${PYTHONPATH:+:$PYTHONPATH}"
 export DIFFSYNTH_MODEL_BASE_PATH=${DIFFSYNTH_MODEL_BASE_PATH:-"$ROOT_DIR/checkpoints"}
@@ -13,7 +12,7 @@ export PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-egl}
 export NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-all}
 export LIBERO_PLUS_REPO=${LIBERO_PLUS_REPO:-"$ROOT_DIR/LIBERO-plus"}
 
-BRIDGEWAM_IMPORT_PATH=$("$FASTWAM_PYTHON" -c 'import bridgewam; print(bridgewam.__file__)')
+BRIDGEWAM_IMPORT_PATH=$("$BRIDGEWAM_PYTHON" -c 'import bridgewam; print(bridgewam.__file__)')
 case "$BRIDGEWAM_IMPORT_PATH" in
     "$ROOT_DIR"/src/bridgewam/*) ;;
     *)
@@ -25,7 +24,7 @@ case "$BRIDGEWAM_IMPORT_PATH" in
 esac
 echo "[LIBERO-Plus stage 1] BridgeWAM import: $BRIDGEWAM_IMPORT_PATH"
 
-task_name="libero_uncond_2cam224_1e-4"
+task_name="libero_uncond_2cam224_lbqs_only_2layer_alternating_cross_self_fullfinetune_1e-4"
 output_override=""
 sample_cap=""
 expected_override=""
@@ -102,7 +101,7 @@ if [ "${LIBERO_PLUS_DETACH:-true}" = "true" ] \
         'set -o pipefail
 cd %q
 export ROOT_DIR=%q
-export FASTWAM_PYTHON=%q
+export BRIDGEWAM_PYTHON=%q
 export STAGE1_OUTPUT_DIR=%q
 export LIBERO_PLUS_STAGE1_IN_TMUX=true
 export LIBERO_PLUS_DETACH=false
@@ -122,7 +121,7 @@ echo "[LIBERO-Plus stage 1] manager exited with code ${rc} at $(date -Iseconds)"
 exit "${rc}"' \
         "$ROOT_DIR" \
         "$ROOT_DIR" \
-        "$FASTWAM_PYTHON" \
+        "$BRIDGEWAM_PYTHON" \
         "$STAGE1_OUTPUT_DIR" \
         "${ALLOW_PARTIAL_STAGE1:-false}" \
         "$DIFFSYNTH_MODEL_BASE_PATH" \
@@ -159,4 +158,4 @@ exit "${rc}"' \
 fi
 
 cd "$ROOT_DIR"
-exec "$FASTWAM_PYTHON" experiments/libero-plus/run_libero_plus_manager.py "${manager_args[@]}"
+exec "$BRIDGEWAM_PYTHON" experiments/libero-plus/run_libero_plus_manager.py "${manager_args[@]}"

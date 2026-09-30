@@ -8,8 +8,6 @@ import torch
 from bridgewam.utils.logging_config import get_logger
 
 from ..bridgewam import BridgeWAM, _profile_stage
-from ..bridgewam_idm import BridgeWAMIDM
-from ..bridgewam_joint import BridgeWAMJoint
 
 
 logger = get_logger(__name__)
@@ -27,14 +25,14 @@ class AblationCheckpointMixin:
         # the same write. Reopening a 5B checkpoint just to append metadata can
         # temporarily double CPU memory and filesystem I/O.
         payload = {
-            "mot": self.mot.state_dict(),
+            "mot": self.bridge.state_dict(),
             "step": step,
             "torch_dtype": str(self.torch_dtype),
             "checkpoint_format_version": 2,
             "model_name": "bridgewam",
             "bridgewam_ablation": dict(self.ablation_config),
         }
-        lbq_config = self.mot.latent_bridge_queries_config()
+        lbq_config = self.bridge.latent_bridge_queries_config()
         if lbq_config is not None:
             payload["latent_bridge_queries"] = lbq_config
         action_architecture = self.action_expert.architecture_config()
@@ -74,6 +72,7 @@ class FrozenVideoBridgeWAM(AblationCheckpointMixin, BridgeWAM):
             )
         payload = torch.load(str(path), map_location="cpu")
         from ..checkpoint_compat import normalize_checkpoint_payload
+
         payload = normalize_checkpoint_payload(payload)
         mot_state = payload.get("mot")
         if not isinstance(mot_state, dict):
@@ -129,7 +128,9 @@ def _prepare_inference_context(
     if use_prompt and use_context:
         raise ValueError("`prompt` and `context/context_mask` are mutually exclusive.")
     if not use_prompt and not use_context:
-        raise ValueError("Either `prompt` or both `context/context_mask` must be provided.")
+        raise ValueError(
+            "Either `prompt` or both `context/context_mask` must be provided."
+        )
 
     if use_prompt:
         context, context_mask = model.encode_prompt(prompt)
@@ -174,7 +175,7 @@ def _prepare_inference_context(
     return context, context_mask
 
 
-class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
+class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAM):
     """Two-stage IDM whose only Video-to-Action channel is Latent Bridge Queries."""
 
     def __init__(self, *args, ablation_config: dict[str, Any], **kwargs):
@@ -220,16 +221,13 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
             },
             "video_attention_mask": video_attention_mask,
             "video_tokens_per_frame": int(video_pre["meta"]["tokens_per_frame"]),
-            "collect_video_kv_cache": False,
         }
         if lbq_reads_full_video:
-            video_tokens, _, lbq_tokens = (
-                self.mot.forward_video_with_full_video_lbqs(**kwargs)
-            )
-        else:
-            video_tokens, _, lbq_tokens = self.mot.forward_video_with_lbqs(
+            video_tokens, lbq_tokens = self.bridge.forward_video_with_full_video_lbqs(
                 **kwargs
             )
+        else:
+            video_tokens, lbq_tokens = self.bridge.forward_bridge_video(**kwargs)
         prediction = (
             self.video_expert.post_dit(video_tokens, video_pre)
             if return_video_prediction
@@ -274,8 +272,7 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
         )
 
         cond_noise_mask = (
-            torch.rand((batch_size,), device=self.device)
-            < self.video_cond_noise_prob
+            torch.rand((batch_size,), device=self.device) < self.video_cond_noise_prob
         )
         timestep_video_cond = torch.zeros_like(
             timestep_video,
@@ -332,7 +329,7 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
         )
         if self_lbq_context is not None:
             raise RuntimeError("BridgeWAM IDM requires `injection_mode=lbq_only`.")
-        action_tokens = self.mot.forward_action_with_video_cache(
+        action_tokens = self.bridge.forward_bridge_action(
             action_tokens=action_pre["tokens"],
             action_freqs=action_pre["freqs"],
             action_t_mod=action_pre["t_mod"],
@@ -340,9 +337,6 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
                 "context": action_pre["context"],
                 "mask": action_pre["context_mask"],
             },
-            video_kv_cache=None,
-            attention_mask=None,
-            video_seq_len=0,
             self_lbq_context=None,
         )
         pred_action = self.action_expert.post_dit(action_tokens, action_pre)
@@ -369,8 +363,7 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
             timestep_action=timestep_action,
         )
         loss_total = (
-            self.loss_lambda_video * loss_video
-            + self.loss_lambda_action * loss_action
+            self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
         )
         return loss_total, {
             "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
@@ -443,7 +436,8 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
         test_action_with_infer_action: bool = False,
         profile: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
-        del action, negative_prompt, text_cfg_scale, test_action_with_infer_action
+        self._validate_inference_options(negative_prompt, text_cfg_scale, tiled)
+        del action, test_action_with_infer_action
         self.eval()
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
@@ -473,9 +467,7 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
             context_mask=context_mask,
             proprio=proprio,
         )
-        latent_t = (
-            (num_video_frames - 1) // self.vae.temporal_downsample_factor + 1
-        )
+        latent_t = (num_video_frames - 1) // self.vae.temporal_downsample_factor + 1
         latent_h = height // self.vae.upsampling_factor
         latent_w = width // self.vae.upsampling_factor
         video_generator = (
@@ -566,7 +558,9 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
         )
         if profile is not None:
             profile["video_seq_len"] = int(video_pre["tokens"].shape[1])
-            profile["latent_bridge_queries"] = self.mot.latent_bridge_queries_config()
+            profile["latent_bridge_queries"] = (
+                self.bridge.latent_bridge_queries_config()
+            )
             profile["action_cross_context_tokens"] = int(
                 action_conditioning["cross_context"].shape[1]
             )
@@ -590,9 +584,6 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
                     timestep_action=timestep_action,
                     action_cross_context=action_conditioning["cross_context"],
                     action_cross_mask=action_conditioning["cross_mask"],
-                    video_kv_cache=None,
-                    attention_mask=None,
-                    video_seq_len=0,
                     self_lbq_context=action_conditioning["self_lbq_context"],
                 ),
                 append_ms=True,
@@ -603,14 +594,17 @@ class BridgeWAMIDMAblation(AblationCheckpointMixin, BridgeWAMIDM):
 
         return {
             "video": self._decode_latents(latents_video, tiled=tiled),
-            "action": latents_action[0].detach().to(
-                device="cpu", dtype=torch.float32
-            ),
+            "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
         }
 
 
-class BridgeWAMJointAblation(AblationCheckpointMixin, BridgeWAMJoint):
+class BridgeWAMJointAblation(AblationCheckpointMixin, BridgeWAM):
     """Synchronous 30-layer Video/LBQ/Action Joint upper bound."""
+
+    @torch.no_grad()
+    def infer_joint(self, *args, test_action_with_infer_action=False, **kwargs):
+        """Joint ablation denoises all three streams; no action-only comparison."""
+        return super().infer_joint(*args, test_action_with_infer_action=False, **kwargs)
 
     def _run_joint_training_branch(
         self,
@@ -648,24 +642,22 @@ class BridgeWAMJointAblation(AblationCheckpointMixin, BridgeWAMJoint):
             video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
             device=video_pre["tokens"].device,
         )
-        video_tokens, action_tokens, lbq_tokens = (
-            self.mot.forward_joint_with_lbqs(
-                video_tokens=video_pre["tokens"],
-                action_tokens=action_pre["tokens"],
-                video_freqs=video_pre["freqs"],
-                action_freqs=action_pre["freqs"],
-                video_t_mod=video_pre["t_mod"],
-                action_t_mod=action_pre["t_mod"],
-                video_context_payload={
-                    "context": video_pre["context"],
-                    "mask": video_pre["context_mask"],
-                },
-                action_context_payload={
-                    "context": action_pre["context"],
-                    "mask": action_pre["context_mask"],
-                },
-                video_attention_mask=video_attention_mask,
-            )
+        video_tokens, action_tokens, lbq_tokens = self.bridge.forward_joint_with_lbqs(
+            video_tokens=video_pre["tokens"],
+            action_tokens=action_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            action_freqs=action_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            action_t_mod=action_pre["t_mod"],
+            video_context_payload={
+                "context": video_pre["context"],
+                "mask": video_pre["context_mask"],
+            },
+            action_context_payload={
+                "context": action_pre["context"],
+                "mask": action_pre["context_mask"],
+            },
+            video_attention_mask=video_attention_mask,
         )
         return (
             self.video_expert.post_dit(video_tokens, video_pre),

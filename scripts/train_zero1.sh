@@ -3,6 +3,8 @@ set -euo pipefail
 
 SCRIPT_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${PROJECT_ROOT}/src:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+cd "${PROJECT_ROOT}"
 DEFAULT_TRAIN_OUTPUT_BASE="${PROJECT_ROOT}/runs/train"
 
 is_true() {
@@ -48,7 +50,7 @@ launch_in_tmux() {
   done
 
   local session_name
-  session_name="${BRIDGEWAM_TMUX_SESSION_NAME:-${FASTWAM_TMUX_SESSION_NAME:-bridgewam_${task_basename}_$(date +%Y%m%d_%H%M%S)_$$}}"
+  session_name="${BRIDGEWAM_TMUX_SESSION_NAME:-bridgewam_${task_basename}_$(date +%Y%m%d_%H%M%S)_$$}"
   session_name="$(sanitize_tmux_name "${session_name}")"
   if [[ -z "${session_name}" ]]; then
     echo "Error: BRIDGEWAM_TMUX_SESSION_NAME produced an empty tmux session name." >&2
@@ -59,7 +61,7 @@ launch_in_tmux() {
     return 1
   fi
 
-  local train_output_base="${BRIDGEWAM_TRAIN_OUTPUT_BASE:-${FASTWAM_TRAIN_OUTPUT_BASE:-${DEFAULT_TRAIN_OUTPUT_BASE}}}"
+  local train_output_base="${BRIDGEWAM_TRAIN_OUTPUT_BASE:-${DEFAULT_TRAIN_OUTPUT_BASE}}"
   local num_machines="${NNODES:-1}"
   local launch_run_id="${RUN_ID:-}"
   if [[ -z "${launch_run_id}" && "${num_machines}" == "1" ]]; then
@@ -82,7 +84,7 @@ launch_in_tmux() {
 
   # A long-lived tmux server may have a stale environment. Forward the values
   # that affect Python/CUDA/distributed training explicitly to the inner job.
-  local -a inner_command=(env "BRIDGEWAM_TMUX_INNER=1" "FASTWAM_TMUX_INNER=1")
+  local -a inner_command=(env "BRIDGEWAM_TMUX_INNER=1")
   if [[ -n "${launch_run_id}" ]]; then
     inner_command+=("RUN_ID=${launch_run_id}")
   fi
@@ -91,7 +93,7 @@ launch_in_tmux() {
     PATH PYTHONPATH LD_LIBRARY_PATH CONDA_PREFIX VIRTUAL_ENV CUDA_HOME
     CUDA_VISIBLE_DEVICES
     DIFFSYNTH_MODEL_BASE_PATH DIFFSYNTH_SKIP_DOWNLOAD
-    ACTION_DIT_PRETRAINED_PATH BRIDGEWAM_TRAIN_OUTPUT_BASE FASTWAM_TRAIN_OUTPUT_BASE
+    ACTION_DIT_PRETRAINED_PATH BRIDGEWAM_TRAIN_OUTPUT_BASE
     NNODES NODE_RANK MASTER_ADDR MASTER_PORT
     RUN_ID_SYNC_TIMEOUT RUN_ID_SYNC_PORT
     WANDB_MODE WANDB_PROJECT WANDB_ENTITY WANDB_DIR
@@ -140,9 +142,9 @@ launch_in_tmux() {
 
 # The user-facing invocation creates a detached tmux session. The marker is
 # only set for the command running inside that session, preventing recursion.
-# BRIDGEWAM_TMUX_DISABLED=1 (or legacy FASTWAM_TMUX_DISABLED=1) keeps the original foreground behavior when needed.
-if [[ "${BRIDGEWAM_TMUX_INNER:-${FASTWAM_TMUX_INNER:-0}}" != "1" ]] \
-  && ! is_true "${BRIDGEWAM_TMUX_DISABLED:-${FASTWAM_TMUX_DISABLED:-0}}"; then
+# BRIDGEWAM_TMUX_DISABLED=1 keeps the original foreground behavior when needed.
+if [[ "${BRIDGEWAM_TMUX_INNER:-0}" != "1" ]] \
+  && ! is_true "${BRIDGEWAM_TMUX_DISABLED:-0}"; then
   launch_in_tmux "$@"
   exit $?
 fi
@@ -152,7 +154,7 @@ shift
 
 MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-${PROJECT_ROOT}/checkpoints}"
 ACTION_DIT_PRETRAINED_PATH="${ACTION_DIT_PRETRAINED_PATH:-${MODEL_BASE_PATH}/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt}"
-TRAIN_OUTPUT_BASE="${BRIDGEWAM_TRAIN_OUTPUT_BASE:-${FASTWAM_TRAIN_OUTPUT_BASE:-${DEFAULT_TRAIN_OUTPUT_BASE}}}"
+TRAIN_OUTPUT_BASE="${BRIDGEWAM_TRAIN_OUTPUT_BASE:-${DEFAULT_TRAIN_OUTPUT_BASE}}"
 WAN_MODEL_DIR="${MODEL_BASE_PATH}/Wan-AI/Wan2.2-TI2V-5B"
 TOKENIZER_DIR="${MODEL_BASE_PATH}/Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl"
 COMMON_MODEL_DIR="${MODEL_BASE_PATH}/DiffSynth-Studio/Wan-Series-Converted-Safetensors"

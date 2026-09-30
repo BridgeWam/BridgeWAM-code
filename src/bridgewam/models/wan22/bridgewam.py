@@ -8,11 +8,10 @@ import torch.nn.functional as F
 from PIL import Image
 
 from bridgewam.utils.logging_config import get_logger
-from latent_bridge_queries.spectral_regularization import lbq_spectral_diversity
+from bridgewam.models.wan22.lbq.spectral_regularization import lbq_spectral_diversity
 
 from .action_dit import ActionDiT
 from .helpers.loader import load_wan22_ti2v_5b_components
-from .mot import MoT
 from .bridge_of_experts import BridgeOfExperts
 from .checkpoint_compat import normalize_checkpoint_payload
 from .schedulers.scheduler_continuous import WanContinuousFlowMatchScheduler
@@ -68,13 +67,13 @@ def _profile_stage(
 
 
 class BridgeWAM(torch.nn.Module):
-    """Video/action world model supporting LBQ bridges and the legacy MoT path."""
+    """Video/action world model connected by Latent Bridge Queries."""
 
     def __init__(
         self,
         video_expert,
         action_expert: ActionDiT,
-        mot: MoT,
+        bridge: BridgeOfExperts,
         vae,
         text_encoder=None,
         tokenizer=None,
@@ -97,21 +96,32 @@ class BridgeWAM(torch.nn.Module):
         super().__init__()
         self.video_expert = video_expert
         self.action_expert = action_expert
-        self.mot = mot
+        if (
+            not bridge.latent_bridge_queries_enabled
+            or bridge.requires_direct_video_kv_cache
+        ):
+            raise ValueError(
+                "BridgeWAM requires an LBQ backbone without direct Video K/V."
+            )
+        self.mot = bridge
         # Keep trainer compatibility: optimizer and freeze logic use `model.dit`.
-        self.dit = self.mot
+        self.dit = self.bridge
 
         self.vae = vae
         self.text_encoder = text_encoder
         self.tokenizer = tokenizer
         if text_dim is None:
             if self.text_encoder is None:
-                raise ValueError("`text_dim` is required when `text_encoder` is not loaded.")
+                raise ValueError(
+                    "`text_dim` is required when `text_encoder` is not loaded."
+                )
             text_dim = int(self.text_encoder.dim)
         self.text_dim = int(text_dim)
         self.proprio_dim = None if proprio_dim is None else int(proprio_dim)
         if self.proprio_dim is not None:
-            self.proprio_encoder = nn.Linear(self.proprio_dim, self.text_dim).to(torch_dtype)
+            self.proprio_encoder = nn.Linear(self.proprio_dim, self.text_dim).to(
+                torch_dtype
+            )
         else:
             self.proprio_encoder = None
 
@@ -131,7 +141,7 @@ class BridgeWAM(torch.nn.Module):
             num_train_timesteps=action_num_train_timesteps,
             shift=action_infer_shift,
         )
-        # Optional aliases for consistency with Wan22Core naming.
+        # Scheduler aliases used by the training utilities.
         self.train_scheduler = self.train_video_scheduler
         self.infer_scheduler = self.infer_video_scheduler
 
@@ -141,14 +151,35 @@ class BridgeWAM(torch.nn.Module):
         self.loss_lambda_action = float(loss_lambda_action)
         self.loss_lambda_lbq_spectral = float(loss_lambda_lbq_spectral)
         self.lbq_spectral_diagnostics = bool(lbq_spectral_diagnostics)
-        if not math.isfinite(self.loss_lambda_lbq_spectral) or self.loss_lambda_lbq_spectral < 0:
-            raise ValueError("loss.lambda_lbq_spectral must be finite and nonnegative.")
-        if (self.loss_lambda_lbq_spectral > 0 or self.lbq_spectral_diagnostics) and not (
-            self.mot.latent_bridge_queries_enabled
+        if (
+            not math.isfinite(self.loss_lambda_lbq_spectral)
+            or self.loss_lambda_lbq_spectral < 0
         ):
-            raise ValueError("LBQ spectral regularization/diagnostics require enabled LBQs.")
+            raise ValueError("loss.lambda_lbq_spectral must be finite and nonnegative.")
+        if (
+            self.loss_lambda_lbq_spectral > 0 or self.lbq_spectral_diagnostics
+        ) and not (self.bridge.latent_bridge_queries_enabled):
+            raise ValueError(
+                "LBQ spectral regularization/diagnostics require enabled LBQs."
+            )
 
         self.to(self.device)
+
+    @property
+    def bridge(self) -> BridgeOfExperts:
+        """Live backbone; `mot` remains the registered checkpoint key only."""
+        return self.mot
+
+    @staticmethod
+    def _validate_inference_options(negative_prompt, text_cfg_scale, tiled):
+        if negative_prompt not in (None, "") or float(text_cfg_scale) != 1.0:
+            raise ValueError(
+                "BridgeWAM supports text_cfg_scale=1 and an empty negative_prompt; CFG is not implemented."
+            )
+        if tiled:
+            raise ValueError(
+                "BridgeWAM's Wan2.2 VAE input encoder requires tiled=false."
+            )
 
     @classmethod
     def from_wan22_pretrained(
@@ -165,8 +196,7 @@ class BridgeWAM(torch.nn.Module):
         action_dit_config: dict[str, Any] | None = None,
         action_dit_pretrained_path: str | None = None,
         skip_dit_load_from_pretrain: bool = False,
-        mot_checkpoint_mixed_attn: bool = True,
-        action_video_kv_routing: Optional[dict[str, Any]] = None,
+        checkpoint_attention: bool = True,
         video_train_shift: float = 5.0,
         video_infer_shift: float = 5.0,
         video_num_train_timesteps: int = 1000,
@@ -180,13 +210,21 @@ class BridgeWAM(torch.nn.Module):
         lbq_spectral_diagnostics: bool = False,
     ):
         if video_dit_config is None:
-            raise ValueError("`video_dit_config` is required for BridgeWAM.from_wan22_pretrained().")
+            raise ValueError(
+                "`video_dit_config` is required for BridgeWAM.from_wan22_pretrained()."
+            )
         if "text_dim" not in video_dit_config:
-            raise ValueError("`video_dit_config['text_dim']` is required for BridgeWAM.")
+            raise ValueError(
+                "`video_dit_config['text_dim']` is required for BridgeWAM."
+            )
         action_dit_config = dict(action_dit_config or {})
-        lbq_enabled = bool(
-            (latent_bridge_queries or {}).get("enabled", False)
-        )
+        lbq_enabled = bool((latent_bridge_queries or {}).get("enabled", False))
+        if not lbq_enabled or (latent_bridge_queries or {}).get(
+            "preserve_direct_video_kv", True
+        ):
+            raise ValueError(
+                "BridgeWAM requires enabled LBQs and preserve_direct_video_kv=false."
+            )
         injection_mode = str(
             (latent_bridge_queries or {}).get("injection_mode", "lbq_only")
             if lbq_enabled
@@ -237,9 +275,13 @@ class BridgeWAM(torch.nn.Module):
             torch_dtype=torch_dtype,
         )
         if int(action_expert.num_heads) != int(video_expert.num_heads):
-            raise ValueError("ActionDiT `num_heads` must match video expert for MoT mixed attention.")
+            raise ValueError(
+                "ActionDiT `num_heads` must match video expert for BridgeWAM shared attention."
+            )
         if int(action_expert.attn_head_dim) != int(video_expert.attn_head_dim):
-            raise ValueError("ActionDiT `attn_head_dim` must match video expert for MoT mixed attention.")
+            raise ValueError(
+                "ActionDiT `attn_head_dim` must match video expert for BridgeWAM shared attention."
+            )
         action_architecture = str(getattr(action_expert, "architecture", "full"))
         allow_separate_action_depth = (
             action_architecture == "alternating_cross_self"
@@ -258,22 +300,16 @@ class BridgeWAM(torch.nn.Module):
                 "preserve_direct_video_kv=false."
             )
 
-        backbone_class = (
-            BridgeOfExperts if lbq_enabled and not bool(
-                (latent_bridge_queries or {}).get("preserve_direct_video_kv", True)
-            ) else MoT
-        )
-        mot = backbone_class(
+        bridge = BridgeOfExperts(
             mixtures={"video": video_expert, "action": action_expert},
-            mot_checkpoint_mixed_attn=mot_checkpoint_mixed_attn,
-            action_video_kv_routing=action_video_kv_routing,
+            checkpoint_attention=checkpoint_attention,
             latent_bridge_queries=latent_bridge_queries,
         )
 
         model = cls(
             video_expert=video_expert,
             action_expert=action_expert,
-            mot=mot,
+            bridge=bridge,
             vae=components.vae,
             text_encoder=components.text_encoder,
             tokenizer=components.tokenizer,
@@ -299,14 +335,16 @@ class BridgeWAM(torch.nn.Module):
             "text_encoder": components.text_encoder_path,
             "tokenizer": components.tokenizer_path,
             "action_dit_backbone": (
-                "SKIPPED_PRETRAIN" if skip_dit_load_from_pretrain else action_dit_pretrained_path
+                "SKIPPED_PRETRAIN"
+                if skip_dit_load_from_pretrain
+                else action_dit_pretrained_path
             ),
         }
         return model
 
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.mot.to(*args, **kwargs)
+        self.bridge.to(*args, **kwargs)
         if self.text_encoder is not None:
             self.text_encoder.to(*args, **kwargs)
         self.vae.to(*args, **kwargs)
@@ -349,22 +387,28 @@ class BridgeWAM(torch.nn.Module):
         if self.proprio_encoder is None or proprio is None:
             return context, context_mask
         if proprio.ndim != 2:
-            raise ValueError(f"`proprio` must be 2D [B, D], got shape {tuple(proprio.shape)}")
+            raise ValueError(
+                f"`proprio` must be 2D [B, D], got shape {tuple(proprio.shape)}"
+            )
         if self.proprio_dim is None or proprio.shape[1] != self.proprio_dim:
             raise ValueError(
                 f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}"
             )
         proprio_token = self.proprio_encoder(
             proprio.to(device=self.device, dtype=context.dtype).unsqueeze(1)
-        ).to(dtype=context.dtype) # [B, 1, D]
-        proprio_mask = torch.ones((context_mask.shape[0], 1), dtype=torch.bool, device=context_mask.device)
+        ).to(dtype=context.dtype)  # [B, 1, D]
+        proprio_mask = torch.ones(
+            (context_mask.shape[0], 1), dtype=torch.bool, device=context_mask.device
+        )
         return (
             torch.cat([context, proprio_token], dim=1),
             torch.cat([context_mask, proprio_mask], dim=1),
         )
 
     @torch.no_grad()
-    def _encode_video_latents(self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
+    def _encode_video_latents(
+        self, video_tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)
+    ):
         z = self.vae.encode(
             video_tensor,
             device=self.device,
@@ -375,21 +419,45 @@ class BridgeWAM(torch.nn.Module):
         return z
 
     @torch.no_grad()
-    def _encode_input_image_latents_tensor(self, input_image: torch.Tensor, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
+    def _encode_input_image_latents_tensor(
+        self,
+        input_image: torch.Tensor,
+        tiled=False,
+        tile_size=(30, 52),
+        tile_stride=(15, 26),
+    ):
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
-        if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
+        if (
+            input_image.ndim != 4
+            or input_image.shape[0] != 1
+            or input_image.shape[1] != 3
+        ):
             raise ValueError(
                 f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
             )
         image = input_image.to(device=self.device)[0].unsqueeze(1)
-        z = self.vae.encode([image], device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+        z = self.vae.encode(
+            [image],
+            device=self.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        )
         if isinstance(z, list):
             z = z[0].unsqueeze(0)
         return z
 
-    def _decode_latents(self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)):
-        video_tensor = self.vae.decode(latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride)
+    def _decode_latents(
+        self, latents, tiled=False, tile_size=(30, 52), tile_stride=(15, 26)
+    ):
+        video_tensor = self.vae.decode(
+            latents,
+            device=self.device,
+            tiled=tiled,
+            tile_size=tile_size,
+            tile_stride=tile_stride,
+        )
         video_tensor = video_tensor.squeeze(0).detach().float().clamp(-1, 1)
         video_tensor = ((video_tensor + 1.0) * 127.5).to(torch.uint8).cpu()
         frames = []
@@ -408,9 +476,13 @@ class BridgeWAM(torch.nn.Module):
         context_mask = sample["context_mask"]
         proprio = sample.get("proprio", None)
         if video.ndim != 5:
-            raise ValueError(f"`sample['video']` must be 5D [B, 3, T, H, W], got shape {tuple(video.shape)}")
+            raise ValueError(
+                f"`sample['video']` must be 5D [B, 3, T, H, W], got shape {tuple(video.shape)}"
+            )
         if video.shape[1] != 3:
-            raise ValueError(f"`sample['video']` channel dimension must be 3, got shape {tuple(video.shape)}")
+            raise ValueError(
+                f"`sample['video']` channel dimension must be 3, got shape {tuple(video.shape)}"
+            )
 
         batch_size, _, num_frames, height, width = video.shape
         if height % 16 != 0 or width % 16 != 0:
@@ -420,14 +492,18 @@ class BridgeWAM(torch.nn.Module):
         if num_frames % 4 != 1:
             raise ValueError(f"Video T must satisfy T % 4 == 1, got T={num_frames}")
         if num_frames <= 1:
-            raise ValueError(f"Video T must be > 1 for action-conditioned training, got T={num_frames}")
+            raise ValueError(
+                f"Video T must be > 1 for action-conditioned training, got T={num_frames}"
+            )
 
         if "action" not in sample:
             raise ValueError("`sample['action']` is required for BridgeWAM training.")
 
         action = sample["action"]
         if action.ndim != 3:
-            raise ValueError(f"`sample['action']` must be 3D [B, T, a_dim], got shape {tuple(action.shape)}")
+            raise ValueError(
+                f"`sample['action']` must be 3D [B, T, a_dim], got shape {tuple(action.shape)}"
+            )
         action_horizon = int(action.shape[1])
         if action_horizon % (num_frames - 1) != 0:
             raise ValueError(
@@ -440,7 +516,10 @@ class BridgeWAM(torch.nn.Module):
                 raise ValueError(
                     f"`sample['action_is_pad']` must be 2D [B, T], got shape {tuple(action_is_pad.shape)}"
                 )
-            if action_is_pad.shape[0] != batch_size or action_is_pad.shape[1] != action_horizon:
+            if (
+                action_is_pad.shape[0] != batch_size
+                or action_is_pad.shape[1] != action_horizon
+            ):
                 raise ValueError(
                     "`sample['action_is_pad']` shape mismatch: "
                     f"got {tuple(action_is_pad.shape)} vs expected ({batch_size}, {action_horizon})"
@@ -452,13 +531,18 @@ class BridgeWAM(torch.nn.Module):
                 raise ValueError(
                     f"`sample['image_is_pad']` must be 2D [B, T], got shape {tuple(image_is_pad.shape)}"
                 )
-            if image_is_pad.shape[0] != batch_size or image_is_pad.shape[1] != num_frames:
+            if (
+                image_is_pad.shape[0] != batch_size
+                or image_is_pad.shape[1] != num_frames
+            ):
                 raise ValueError(
                     "`sample['image_is_pad']` shape mismatch: "
                     f"got {tuple(image_is_pad.shape)} vs expected ({batch_size}, {num_frames})"
                 )
-        
-        input_video = video.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+
+        input_video = video.to(
+            device=self.device, dtype=self.torch_dtype, non_blocking=True
+        )
         input_latents = self._encode_video_latents(input_video, tiled=tiled)
 
         first_frame_latents = None
@@ -471,29 +555,43 @@ class BridgeWAM(torch.nn.Module):
             raise ValueError(
                 f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
             )
-        context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-        context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+        context = context.to(
+            device=self.device, dtype=self.torch_dtype, non_blocking=True
+        )
+        context_mask = context_mask.to(
+            device=self.device, dtype=torch.bool, non_blocking=True
+        )
         if self.proprio_encoder is not None:
             if proprio is None:
-                raise ValueError("`sample['proprio']` is required when `proprio_dim` is enabled.")
+                raise ValueError(
+                    "`sample['proprio']` is required when `proprio_dim` is enabled."
+                )
             if proprio.ndim != 3:
-                raise ValueError(f"`sample['proprio']` must be 3D [B, T, d], got shape {tuple(proprio.shape)}")
+                raise ValueError(
+                    f"`sample['proprio']` must be 3D [B, T, d], got shape {tuple(proprio.shape)}"
+                )
             if proprio.shape[2] != self.proprio_dim:
                 raise ValueError(
                     f"`sample['proprio']` last dim must be {self.proprio_dim}, got {proprio.shape[2]}"
                 )
-            proprio = proprio[:, 0, :] # [B, D]
+            proprio = proprio[:, 0, :]  # [B, D]
             context, context_mask = self._append_proprio_to_context(
                 context=context,
                 context_mask=context_mask,
                 proprio=proprio.to(device=self.device, dtype=self.torch_dtype),
             )
-        action = action.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
+        action = action.to(
+            device=self.device, dtype=self.torch_dtype, non_blocking=True
+        )
 
         if action_is_pad is not None:
-            action_is_pad = action_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
+            action_is_pad = action_is_pad.to(
+                device=self.device, dtype=torch.bool, non_blocking=True
+            )
         if image_is_pad is not None:
-            image_is_pad = image_is_pad.to(device=self.device, dtype=torch.bool, non_blocking=True)
+            image_is_pad = image_is_pad.to(
+                device=self.device, dtype=torch.bool, non_blocking=True
+            )
 
         return {
             "context": context,
@@ -505,30 +603,6 @@ class BridgeWAM(torch.nn.Module):
             "action_is_pad": action_is_pad,
             "image_is_pad": image_is_pad,
         }
-
-    @torch.no_grad()
-    def _build_mot_attention_mask(
-        self,
-        video_seq_len: int,
-        action_seq_len: int,
-        video_tokens_per_frame: int,
-        device: torch.device,
-    ) -> torch.Tensor:
-        total_seq_len = video_seq_len + action_seq_len
-        mask = torch.zeros((total_seq_len, total_seq_len), dtype=torch.bool, device=device)
-
-        # video -> video
-        mask[:video_seq_len, :video_seq_len] = self.video_expert.build_video_to_video_mask(
-            video_seq_len=video_seq_len,
-            video_tokens_per_frame=video_tokens_per_frame,
-            device=device,
-        )
-        # action -> action
-        mask[video_seq_len:, video_seq_len:] = True
-        # action -> first-frame video only
-        first_frame_tokens = min(video_tokens_per_frame, video_seq_len)
-        mask[video_seq_len:, :first_frame_tokens] = True
-        return mask
 
     def _prepare_action_dit_inputs(
         self,
@@ -563,13 +637,17 @@ class BridgeWAM(torch.nn.Module):
         image_is_pad: Optional[torch.Tensor],
         include_initial_video_step: bool,
     ) -> torch.Tensor:
-        video_loss_token = F.mse_loss(pred_video.float(), target_video.float(), reduction="none").mean(dim=(1, 3, 4))
+        video_loss_token = F.mse_loss(
+            pred_video.float(), target_video.float(), reduction="none"
+        ).mean(dim=(1, 3, 4))
         if image_is_pad is None:
             return video_loss_token.mean(dim=1)
 
         temporal_factor = int(self.vae.temporal_downsample_factor)
         if temporal_factor <= 0:
-            raise ValueError(f"`vae.temporal_downsample_factor` must be positive, got {temporal_factor}.")
+            raise ValueError(
+                f"`vae.temporal_downsample_factor` must be positive, got {temporal_factor}."
+            )
         if image_is_pad.shape[1] < 1:
             raise ValueError("`image_is_pad` must contain at least one frame.")
         if (image_is_pad.shape[1] - 1) % temporal_factor != 0:
@@ -579,7 +657,9 @@ class BridgeWAM(torch.nn.Module):
             )
 
         tail_is_pad = image_is_pad[:, 1:]
-        latent_tail_is_pad = tail_is_pad.view(image_is_pad.shape[0], -1, temporal_factor).all(dim=2)
+        latent_tail_is_pad = tail_is_pad.view(
+            image_is_pad.shape[0], -1, temporal_factor
+        ).all(dim=2)
         if include_initial_video_step:
             video_is_pad = torch.cat([image_is_pad[:, :1], latent_tail_is_pad], dim=1)
         else:
@@ -591,22 +671,24 @@ class BridgeWAM(torch.nn.Module):
                 f"mask steps={video_is_pad.shape[1]}, loss steps={video_loss_token.shape[1]}."
             )
 
-        valid = (~video_is_pad).to(device=video_loss_token.device, dtype=video_loss_token.dtype)
+        valid = (~video_is_pad).to(
+            device=video_loss_token.device, dtype=video_loss_token.dtype
+        )
         valid_sum = valid.sum(dim=1).clamp(min=1.0)
         return (video_loss_token * valid).sum(dim=1) / valid_sum
 
     def _run_joint_training_branch(
         self,
         *,
-        latents_video: torch.Tensor,
-        noisy_action: torch.Tensor,
-        timestep_video: torch.Tensor,
-        timestep_action: torch.Tensor,
-        context: torch.Tensor,
-        context_mask: torch.Tensor,
-        action: Optional[torch.Tensor],
-        fuse_vae_embedding_in_latents: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        latents_video,
+        noisy_action,
+        timestep_video,
+        timestep_action,
+        context,
+        context_mask,
+        action,
+        fuse_vae_embedding_in_latents,
+    ):
         video_pre = self.video_expert.pre_dit(
             x=latents_video,
             timestep=timestep_video,
@@ -615,118 +697,43 @@ class BridgeWAM(torch.nn.Module):
             action=action,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
         )
-        video_seq_len = int(video_pre["tokens"].shape[1])
-
-        if self.mot.latent_bridge_queries_enabled:
-            direct_video_kv = self.mot.requires_direct_video_kv_cache
-            attention_mask = (
-                self._build_mot_attention_mask(
-                    video_seq_len=video_seq_len,
-                    action_seq_len=int(noisy_action.shape[1]),
-                    video_tokens_per_frame=int(
-                        video_pre["meta"]["tokens_per_frame"]
-                    ),
-                    device=video_pre["tokens"].device,
-                )
-                if direct_video_kv
-                else None
-            )
-            video_attention_mask = self.video_expert.build_video_to_video_mask(
-                video_tokens_per_frame=int(
-                    video_pre["meta"]["tokens_per_frame"]
-                ),
-                video_seq_len=video_seq_len,
-                device=video_pre["tokens"].device,
-            )
-            video_tokens, video_kv_cache, lbq_tokens = (
-                (self.mot.forward_bridge_video if isinstance(self.mot, BridgeOfExperts)
-                 else self.mot.forward_video_with_lbqs)(
-                    video_tokens=video_pre["tokens"],
-                    video_freqs=video_pre["freqs"],
-                    video_t_mod=video_pre["t_mod"],
-                    video_context_payload={
-                        "context": video_pre["context"],
-                        "mask": video_pre["context_mask"],
-                    },
-                    video_attention_mask=video_attention_mask,
-                    video_tokens_per_frame=int(
-                        video_pre["meta"]["tokens_per_frame"]
-                    ),
-                    collect_video_kv_cache=direct_video_kv,
-                )
-            )
-            action_pre, self_lbq_context, lbq_context = self._prepare_action_dit_inputs(
-                action_tokens=noisy_action,
-                timestep=timestep_action,
-                text_state_context=context,
-                text_state_mask=context_mask,
-                lbq_hidden=lbq_tokens,
-            )
-            action_tokens = (self.mot.forward_bridge_action if isinstance(self.mot, BridgeOfExperts)
-             else self.mot.forward_action_with_video_cache)(
-                action_tokens=action_pre["tokens"],
-                action_freqs=action_pre["freqs"],
-                action_t_mod=action_pre["t_mod"],
-                action_context_payload={
-                    "context": action_pre["context"],
-                    "mask": action_pre["context_mask"],
-                },
-                video_kv_cache=video_kv_cache,
-                attention_mask=attention_mask,
-                video_seq_len=video_seq_len,
-                self_lbq_context=self_lbq_context,
-            )
-            return (
-                self.video_expert.post_dit(video_tokens, video_pre),
-                self.action_expert.post_dit(action_tokens, action_pre),
-                {
-                    "lbq_tokens": lbq_tokens,
-                    "lbq_context": lbq_context,
-                },
-            )
-
-        action_pre, _, _ = self._prepare_action_dit_inputs(
+        video_attention_mask = self.video_expert.build_video_to_video_mask(
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            video_seq_len=int(video_pre["tokens"].shape[1]),
+            device=video_pre["tokens"].device,
+        )
+        video_tokens, lbq_tokens = self.bridge.forward_bridge_video(
+            video_tokens=video_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            video_context_payload={
+                "context": video_pre["context"],
+                "mask": video_pre["context_mask"],
+            },
+            video_attention_mask=video_attention_mask,
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+        )
+        action_pre, self_lbq_context, lbq_context = self._prepare_action_dit_inputs(
             action_tokens=noisy_action,
             timestep=timestep_action,
             text_state_context=context,
             text_state_mask=context_mask,
+            lbq_hidden=lbq_tokens,
         )
-        attention_mask = self._build_mot_attention_mask(
-            video_seq_len=video_pre["tokens"].shape[1],
-            action_seq_len=action_pre["tokens"].shape[1],
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
-            device=video_pre["tokens"].device,
+        action_tokens = self.bridge.forward_bridge_action(
+            action_tokens=action_pre["tokens"],
+            action_freqs=action_pre["freqs"],
+            action_t_mod=action_pre["t_mod"],
+            action_context_payload={
+                "context": action_pre["context"],
+                "mask": action_pre["context_mask"],
+            },
+            self_lbq_context=self_lbq_context,
         )
-        mot_output = self.mot(
-            embeds_all={
-                "video": video_pre["tokens"],
-                "action": action_pre["tokens"],
-            },
-            attention_mask=attention_mask,
-            freqs_all={
-                "video": video_pre["freqs"],
-                "action": action_pre["freqs"],
-            },
-            context_all={
-                "video": {
-                    "context": video_pre["context"],
-                    "mask": video_pre["context_mask"],
-                },
-                "action": {
-                    "context": action_pre["context"],
-                    "mask": action_pre["context_mask"],
-                },
-            },
-            t_mod_all={
-                "video": video_pre["t_mod"],
-                "action": action_pre["t_mod"],
-            },
-        )
-
         return (
-            self.video_expert.post_dit(mot_output["video"], video_pre),
-            self.action_expert.post_dit(mot_output["action"], action_pre),
-            {},
+            self.video_expert.post_dit(video_tokens, video_pre),
+            self.action_expert.post_dit(action_tokens, action_pre),
+            {"lbq_tokens": lbq_tokens, "lbq_context": lbq_context},
         )
 
     def _compute_weighted_action_loss(
@@ -792,8 +799,12 @@ class BridgeWAM(torch.nn.Module):
             device=self.device,
             dtype=action.dtype,
         )
-        noisy_action = self.train_action_scheduler.add_noise(action, noise_action, timestep_action)
-        target_action = self.train_action_scheduler.training_target(action, noise_action, timestep_action)
+        noisy_action = self.train_action_scheduler.add_noise(
+            action, noise_action, timestep_action
+        )
+        target_action = self.train_action_scheduler.training_target(
+            action, noise_action, timestep_action
+        )
 
         pred_video, pred_action, auxiliary = self._run_joint_training_branch(
             latents_video=noisy_video,
@@ -829,12 +840,14 @@ class BridgeWAM(torch.nn.Module):
             timestep_action=timestep_action,
         )
 
-        loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
+        loss_total = (
+            self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
+        )
         loss_dict = {
             "loss_video": self.loss_lambda_video * float(loss_video.detach().item()),
             "loss_action": self.loss_lambda_action * float(loss_action.detach().item()),
         }
-        if self.mot.latent_bridge_queries_enabled:
+        if self.bridge.latent_bridge_queries_enabled:
             lbq_tokens = auxiliary["lbq_tokens"]
             lbq_context = auxiliary["lbq_context"]
             loss_dict["lbq_token_rms"] = float(
@@ -847,20 +860,26 @@ class BridgeWAM(torch.nn.Module):
                 # A diagnostics-only run must not add even a zero-weight edge
                 # to autograd, nor change which parameters receive gradients.
                 spectral_input = (
-                    lbq_tokens if self.loss_lambda_lbq_spectral > 0 else lbq_tokens.detach()
+                    lbq_tokens
+                    if self.loss_lambda_lbq_spectral > 0
+                    else lbq_tokens.detach()
                 )
                 loss_spectral, readout_metrics = lbq_spectral_diversity(
                     spectral_input, diagnostics=self.lbq_spectral_diagnostics
                 )
-                loss_dict["loss_lbq_spectral_raw"] = float(loss_spectral.detach().item())
+                loss_dict["loss_lbq_spectral_raw"] = float(
+                    loss_spectral.detach().item()
+                )
                 loss_dict["loss_lbq_spectral"] = (
                     self.loss_lambda_lbq_spectral * loss_dict["loss_lbq_spectral_raw"]
                 )
                 if self.loss_lambda_lbq_spectral > 0:
-                    loss_total = loss_total + self.loss_lambda_lbq_spectral * loss_spectral
+                    loss_total = (
+                        loss_total + self.loss_lambda_lbq_spectral * loss_spectral
+                    )
                 if self.lbq_spectral_diagnostics:
                     sources = {
-                        "embedding": self.mot.latent_bridge_queries.lbq_embeddings,
+                        "embedding": self.bridge.latent_bridge_queries.lbq_embeddings,
                         "context": lbq_context,
                     }
                     all_metrics = {"readout": readout_metrics}
@@ -869,139 +888,53 @@ class BridgeWAM(torch.nn.Module):
                             hidden.detach(), diagnostics=True
                         )
                     for name, metrics in all_metrics.items():
-                        loss_dict.update({f"lbq_{name}_{key}": value for key, value in metrics.items()})
+                        loss_dict.update(
+                            {
+                                f"lbq_{name}_{key}": value
+                                for key, value in metrics.items()
+                            }
+                        )
         return loss_total, loss_dict
 
     @torch.no_grad()
     def _predict_joint_noise(
         self,
-        latents_video: torch.Tensor,
-        latents_action: torch.Tensor,
-        timestep_video: torch.Tensor,
-        timestep_action: torch.Tensor,
-        context: torch.Tensor,
-        context_mask: torch.Tensor,
-        fuse_vae_embedding_in_latents: bool,
-        gt_action: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.mot.latent_bridge_queries_enabled:
-            pred_video, pred_action, _ = self._run_joint_training_branch(
-                latents_video=latents_video,
-                noisy_action=latents_action,
-                timestep_video=timestep_video,
-                timestep_action=timestep_action,
-                context=context,
-                context_mask=context_mask,
-                action=gt_action,
-                fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
-            )
-            return pred_video, pred_action
-
-        video_pre = self.video_expert.pre_dit(
-            x=latents_video,
-            timestep=timestep_video,
+        latents_video,
+        latents_action,
+        timestep_video,
+        timestep_action,
+        context,
+        context_mask,
+        fuse_vae_embedding_in_latents,
+        gt_action=None,
+    ):
+        video, action, _ = self._run_joint_training_branch(
+            latents_video=latents_video,
+            noisy_action=latents_action,
+            timestep_video=timestep_video,
+            timestep_action=timestep_action,
             context=context,
             context_mask=context_mask,
             action=gt_action,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
         )
-        action_pre, _, _ = self._prepare_action_dit_inputs(
-            action_tokens=latents_action,
-            timestep=timestep_action,
-            text_state_context=context,
-            text_state_mask=context_mask,
-        )
-
-        attention_mask = self._build_mot_attention_mask(
-            video_seq_len=video_pre["tokens"].shape[1],
-            action_seq_len=action_pre["tokens"].shape[1],
-            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
-            device=video_pre["tokens"].device,
-        )
-
-        tokens_out = self.mot(
-            embeds_all={
-                "video": video_pre["tokens"],
-                "action": action_pre["tokens"],
-            },
-            attention_mask=attention_mask,
-            freqs_all={
-                "video": video_pre["freqs"],
-                "action": action_pre["freqs"],
-            },
-            context_all={
-                "video": {
-                    "context": video_pre["context"],
-                    "mask": video_pre["context_mask"],
-                },
-                "action": {
-                    "context": action_pre["context"],
-                    "mask": action_pre["context_mask"],
-                },
-            },
-            t_mod_all={
-                "video": video_pre["t_mod"],
-                "action": action_pre["t_mod"],
-            },
-        )
-
-        pred_video = self.video_expert.post_dit(tokens_out["video"], video_pre)
-        pred_action = self.action_expert.post_dit(tokens_out["action"], action_pre)
-        return pred_video, pred_action
-
-    @torch.no_grad()
-    def _predict_action_noise(
-        self,
-        first_frame_latents: torch.Tensor,
-        latents_action: torch.Tensor,
-        timestep_action: torch.Tensor,
-        context: torch.Tensor,
-        context_mask: torch.Tensor,
-        fuse_vae_embedding_in_latents: bool,
-    ) -> torch.Tensor:
-        """Compatibility entry point; prefill once, then run one cached action step.
-
-        Repeated denoising should use infer_action(), which reuses the prefill.
-        """
-        _, video_seq_len, attention_mask, video_kv_cache, lbq_tokens = self._prefill_video_for_action(
-            first_frame_latents=first_frame_latents,
-            context=context,
-            context_mask=context_mask,
-            action_seq_len=latents_action.shape[1],
-            fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
-        )
-        conditioning = self.action_expert.prepare_conditioning(
-            text_state_context=context,
-            text_state_mask=context_mask,
-            lbq_hidden=lbq_tokens,
-        )
-        return self._predict_action_noise_with_cache(
-            latents_action=latents_action,
-            timestep_action=timestep_action,
-            action_cross_context=conditioning["cross_context"],
-            action_cross_mask=conditioning["cross_mask"],
-            video_kv_cache=video_kv_cache,
-            attention_mask=attention_mask,
-            video_seq_len=video_seq_len,
-            self_lbq_context=conditioning["self_lbq_context"],
-        )
+        return video, action
 
     @torch.no_grad()
     def _prefill_video_for_action(
         self,
-        first_frame_latents: torch.Tensor,
-        context: torch.Tensor,
-        context_mask: torch.Tensor,
-        action_seq_len: int,
-        fuse_vae_embedding_in_latents: bool,
+        first_frame_latents,
+        context,
+        context_mask,
+        fuse_vae_embedding_in_latents,
     ):
-        """Prepare fixed visual conditioning for baseline and LBQ action inference."""
+        """Read the observed frame once and cache the selected LBQ readout."""
         timestep_video = torch.zeros(
             (first_frame_latents.shape[0],),
             dtype=first_frame_latents.dtype,
             device=self.device,
         )
-        video_pre_local = self.video_expert.pre_dit(
+        video_pre = self.video_expert.pre_dit(
             x=first_frame_latents,
             timestep=timestep_video,
             context=context,
@@ -1009,60 +942,23 @@ class BridgeWAM(torch.nn.Module):
             action=None,
             fuse_vae_embedding_in_latents=fuse_vae_embedding_in_latents,
         )
-        video_seq_len_local = int(video_pre_local["tokens"].shape[1])
-        direct_video_kv = self.mot.requires_direct_video_kv_cache
-        attention_mask_local = (
-            self._build_mot_attention_mask(
-                video_seq_len=video_seq_len_local,
-                action_seq_len=action_seq_len,
-                video_tokens_per_frame=int(
-                    video_pre_local["meta"]["tokens_per_frame"]
-                ),
-                device=video_pre_local["tokens"].device,
-            )
-            if direct_video_kv
-            else None
+        video_mask = self.video_expert.build_video_to_video_mask(
+            video_seq_len=int(video_pre["tokens"].shape[1]),
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
+            device=video_pre["tokens"].device,
         )
-        video_attention_mask_local = self.video_expert.build_video_to_video_mask(
-            video_seq_len=video_seq_len_local,
-            video_tokens_per_frame=int(video_pre_local["meta"]["tokens_per_frame"]),
-            device=video_pre_local["tokens"].device,
+        lbq_tokens = self.bridge.prefill_bridge(
+            video_tokens=video_pre["tokens"],
+            video_freqs=video_pre["freqs"],
+            video_t_mod=video_pre["t_mod"],
+            video_context_payload={
+                "context": video_pre["context"],
+                "mask": video_pre["context_mask"],
+            },
+            video_attention_mask=video_mask,
+            video_tokens_per_frame=int(video_pre["meta"]["tokens_per_frame"]),
         )
-        video_context_payload = {
-            "context": video_pre_local["context"],
-            "mask": video_pre_local["context_mask"],
-        }
-        if self.mot.latent_bridge_queries_enabled:
-            video_kv_cache_local, lbq_tokens_local = (
-                (self.mot.prefill_bridge if isinstance(self.mot, BridgeOfExperts)
-                 else self.mot.prefill_video_cache_with_lbqs)(
-                    video_tokens=video_pre_local["tokens"],
-                    video_freqs=video_pre_local["freqs"],
-                    video_t_mod=video_pre_local["t_mod"],
-                    video_context_payload=video_context_payload,
-                    video_attention_mask=video_attention_mask_local,
-                    video_tokens_per_frame=int(
-                        video_pre_local["meta"]["tokens_per_frame"]
-                    ),
-                    collect_video_kv_cache=direct_video_kv,
-                )
-            )
-        else:
-            video_kv_cache_local = self.mot.prefill_video_cache(
-                video_tokens=video_pre_local["tokens"],
-                video_freqs=video_pre_local["freqs"],
-                video_t_mod=video_pre_local["t_mod"],
-                video_context_payload=video_context_payload,
-                video_attention_mask=video_attention_mask_local,
-            )
-            lbq_tokens_local = None
-        return (
-            video_pre_local,
-            video_seq_len_local,
-            attention_mask_local,
-            video_kv_cache_local,
-            lbq_tokens_local,
-        )
+        return video_pre, lbq_tokens
 
     @torch.no_grad()
     def _predict_action_noise_with_cache(
@@ -1071,9 +967,6 @@ class BridgeWAM(torch.nn.Module):
         timestep_action: torch.Tensor,
         action_cross_context: torch.Tensor,
         action_cross_mask: torch.Tensor,
-        video_kv_cache: Optional[list[dict[str, torch.Tensor]]],
-        attention_mask: Optional[torch.Tensor],
-        video_seq_len: int,
         self_lbq_context: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         action_pre = self.action_expert.pre_dit(
@@ -1082,8 +975,7 @@ class BridgeWAM(torch.nn.Module):
             context=action_cross_context,
             context_mask=action_cross_mask,
         )
-        action_tokens = (self.mot.forward_bridge_action if isinstance(self.mot, BridgeOfExperts)
-             else self.mot.forward_action_with_video_cache)(
+        action_tokens = self.bridge.forward_bridge_action(
             action_tokens=action_pre["tokens"],
             action_freqs=action_pre["freqs"],
             action_t_mod=action_pre["t_mod"],
@@ -1091,9 +983,6 @@ class BridgeWAM(torch.nn.Module):
                 "context": action_pre["context"],
                 "mask": action_pre["context_mask"],
             },
-            video_kv_cache=video_kv_cache,
-            attention_mask=attention_mask,
-            video_seq_len=video_seq_len,
             self_lbq_context=self_lbq_context,
         )
         return self.action_expert.post_dit(action_tokens, action_pre)
@@ -1105,7 +994,9 @@ class BridgeWAM(torch.nn.Module):
         input_image: torch.Tensor,
         num_video_frames: int,
         action_horizon: int,
-        action: Optional[torch.Tensor] = None, # NOTE: this is gt action for conditioning videos, not for action expert
+        action: Optional[
+            torch.Tensor
+        ] = None,  # NOTE: this is gt action for conditioning videos, not for action expert
         proprio: Optional[torch.Tensor] = None,
         context: Optional[torch.Tensor] = None,
         context_mask: Optional[torch.Tensor] = None,
@@ -1118,10 +1009,13 @@ class BridgeWAM(torch.nn.Module):
         tiled: bool = False,
         test_action_with_infer_action: bool = True,
     ) -> dict[str, Any]:
+        self._validate_inference_options(negative_prompt, text_cfg_scale, tiled)
         self.eval()
         if test_action_with_infer_action:
             if seed is None:
-                raise ValueError("`test_action_with_infer_action=True` requires non-null `seed`.")
+                raise ValueError(
+                    "`test_action_with_infer_action=True` requires non-null `seed`."
+                )
             action_only_out = self.infer_action(
                 prompt=prompt,
                 input_image=input_image.clone(),
@@ -1135,15 +1029,21 @@ class BridgeWAM(torch.nn.Module):
                 tiled=tiled,
                 proprio=proprio.clone() if proprio is not None else None,
             )["action"]
-        
+
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
-        if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
+        if (
+            input_image.ndim != 4
+            or input_image.shape[0] != 1
+            or input_image.shape[1] != 3
+        ):
             raise ValueError(
                 f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
             )
         _, _, height, width = input_image.shape
-        checked_h, checked_w, checked_t = self._check_resize_height_width(height, width, num_video_frames)
+        checked_h, checked_w, checked_t = self._check_resize_height_width(
+            height, width, num_video_frames
+        )
         if (checked_h, checked_w) != (height, width):
             raise ValueError(
                 f"`input_image` must be resized before infer, expected multiples of 16 but got HxW=({height},{width})"
@@ -1155,7 +1055,11 @@ class BridgeWAM(torch.nn.Module):
         if action is not None:
             if action.ndim == 2:
                 action = action.unsqueeze(0)
-            if action.ndim != 3 or action.shape[0] != 1 or action.shape[1] != action_horizon:
+            if (
+                action.ndim != 3
+                or action.shape[0] != 1
+                or action.shape[1] != action_horizon
+            ):
                 # NOTE: This enforces action condition to have the same shape as action horizon to predict, which may be unnecessary
                 raise ValueError(
                     f"`action` must have shape [1, T, a_dim] or [T, a_dim], got {tuple(action.shape)} with action_horizon={action_horizon}"
@@ -1163,23 +1067,37 @@ class BridgeWAM(torch.nn.Module):
             action = action.to(device=self.device, dtype=self.torch_dtype)
         if proprio is not None:
             if self.proprio_dim is None:
-                raise ValueError("`proprio` was provided but `proprio_dim=None` so `proprio_encoder` is disabled.")
+                raise ValueError(
+                    "`proprio` was provided but `proprio_dim=None` so `proprio_encoder` is disabled."
+                )
             if proprio.ndim == 1:
                 proprio = proprio.unsqueeze(0)
             elif proprio.ndim == 2 and proprio.shape[0] == 1:
                 pass
             else:
-                raise ValueError(f"`proprio` must be [D] or [1,D], got shape {tuple(proprio.shape)}")
+                raise ValueError(
+                    f"`proprio` must be [D] or [1,D], got shape {tuple(proprio.shape)}"
+                )
             if proprio.shape[1] != self.proprio_dim:
-                raise ValueError(f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
+                raise ValueError(
+                    f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}"
+                )
             proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
 
         latent_t = (num_video_frames - 1) // self.vae.temporal_downsample_factor + 1
         latent_h = height // self.vae.upsampling_factor
         latent_w = width // self.vae.upsampling_factor
 
-        video_generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
-        action_generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
+        video_generator = (
+            None
+            if seed is None
+            else torch.Generator(device=rand_device).manual_seed(seed)
+        )
+        action_generator = (
+            None
+            if seed is None
+            else torch.Generator(device=rand_device).manual_seed(seed)
+        )
         latents_video = torch.randn(
             (1, self.vae.model.z_dim, latent_t, latent_h, latent_w),
             generator=video_generator,
@@ -1194,22 +1112,32 @@ class BridgeWAM(torch.nn.Module):
         ).to(device=self.device, dtype=self.torch_dtype)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+        first_frame_latents = self._encode_input_image_latents_tensor(
+            input_image=input_image, tiled=tiled
+        )
         latents_video[:, :, 0:1] = first_frame_latents.clone()
-        fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
+        fuse_flag = bool(
+            getattr(self.video_expert, "fuse_vae_embedding_in_latents", False)
+        )
 
         use_prompt = prompt is not None
         use_context = context is not None or context_mask is not None
         if use_prompt and use_context:
-            raise ValueError("`prompt` and `context/context_mask` are mutually exclusive.")
+            raise ValueError(
+                "`prompt` and `context/context_mask` are mutually exclusive."
+            )
         if not use_prompt and not use_context:
-            raise ValueError("Either `prompt` or both `context/context_mask` must be provided.")
+            raise ValueError(
+                "Either `prompt` or both `context/context_mask` must be provided."
+            )
 
         if use_prompt:
             context, context_mask = self.encode_prompt(prompt)
         else:
             if context is None or context_mask is None:
-                raise ValueError("`context` and `context_mask` must be both provided together.")
+                raise ValueError(
+                    "`context` and `context_mask` must be both provided together."
+                )
             if context.ndim == 2:
                 context = context.unsqueeze(0)
             if context_mask.ndim == 1:
@@ -1218,8 +1146,12 @@ class BridgeWAM(torch.nn.Module):
                 raise ValueError(
                     f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                 )
-            context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-            context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+            context = context.to(
+                device=self.device, dtype=self.torch_dtype, non_blocking=True
+            )
+            context_mask = context_mask.to(
+                device=self.device, dtype=torch.bool, non_blocking=True
+            )
         if proprio is not None:
             context, context_mask = self._append_proprio_to_context(
                 context=context,
@@ -1227,17 +1159,21 @@ class BridgeWAM(torch.nn.Module):
                 proprio=proprio,
             )
 
-        infer_timesteps_video, infer_deltas_video = self.infer_video_scheduler.build_inference_schedule(
-            num_inference_steps=num_inference_steps,
-            device=self.device,
-            dtype=latents_video.dtype,
-            shift_override=sigma_shift,
+        infer_timesteps_video, infer_deltas_video = (
+            self.infer_video_scheduler.build_inference_schedule(
+                num_inference_steps=num_inference_steps,
+                device=self.device,
+                dtype=latents_video.dtype,
+                shift_override=sigma_shift,
+            )
         )
-        infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
-            num_inference_steps=num_inference_steps,
-            device=self.device,
-            dtype=latents_action.dtype,
-            shift_override=sigma_shift,
+        infer_timesteps_action, infer_deltas_action = (
+            self.infer_action_scheduler.build_inference_schedule(
+                num_inference_steps=num_inference_steps,
+                device=self.device,
+                dtype=latents_action.dtype,
+                shift_override=sigma_shift,
+            )
         )
         for step_t_video, step_delta_video, step_t_action, step_delta_action in zip(
             infer_timesteps_video,
@@ -1245,8 +1181,12 @@ class BridgeWAM(torch.nn.Module):
             infer_timesteps_action,
             infer_deltas_action,
         ):
-            timestep_video = step_t_video.unsqueeze(0).to(dtype=latents_video.dtype, device=self.device)
-            timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+            timestep_video = step_t_video.unsqueeze(0).to(
+                dtype=latents_video.dtype, device=self.device
+            )
+            timestep_action = step_t_action.unsqueeze(0).to(
+                dtype=latents_action.dtype, device=self.device
+            )
 
             pred_video_posi, pred_action_posi = self._predict_joint_noise(
                 latents_video=latents_video,
@@ -1261,8 +1201,12 @@ class BridgeWAM(torch.nn.Module):
             pred_video = pred_video_posi
             pred_action = pred_action_posi
 
-            latents_video = self.infer_video_scheduler.step(pred_video, step_delta_video, latents_video)
-            latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+            latents_video = self.infer_video_scheduler.step(
+                pred_video, step_delta_video, latents_video
+            )
+            latents_action = self.infer_action_scheduler.step(
+                pred_action, step_delta_action, latents_action
+            )
             latents_video[:, :, 0:1] = first_frame_latents.clone()
 
         action_out = latents_action[0].detach().to(device="cpu", dtype=torch.float32)
@@ -1296,15 +1240,23 @@ class BridgeWAM(torch.nn.Module):
         tiled: bool = False,
         profile: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
+        self._validate_inference_options(negative_prompt, text_cfg_scale, tiled)
         self.eval()
-        if str(getattr(self.video_expert, "video_attention_mask_mode", "")) != "first_frame_causal":
+        if (
+            str(getattr(self.video_expert, "video_attention_mask_mode", ""))
+            != "first_frame_causal"
+        ):
             raise ValueError(
                 "`infer_action` requires `video_attention_mask_mode='first_frame_causal'`."
             )
 
         if input_image.ndim == 3:
             input_image = input_image.unsqueeze(0)
-        if input_image.ndim != 4 or input_image.shape[0] != 1 or input_image.shape[1] != 3:
+        if (
+            input_image.ndim != 4
+            or input_image.shape[0] != 1
+            or input_image.shape[1] != 3
+        ):
             raise ValueError(
                 f"`input_image` must have shape [1,3,H,W] or [3,H,W], got {tuple(input_image.shape)}"
             )
@@ -1315,18 +1267,28 @@ class BridgeWAM(torch.nn.Module):
             )
         if proprio is not None:
             if self.proprio_dim is None:
-                raise ValueError("`proprio` was provided but `proprio_dim=None` so `proprio_encoder` is disabled.")
+                raise ValueError(
+                    "`proprio` was provided but `proprio_dim=None` so `proprio_encoder` is disabled."
+                )
             if proprio.ndim == 1:
                 proprio = proprio.unsqueeze(0)
             elif proprio.ndim == 2 and proprio.shape[0] == 1:
                 pass
             else:
-                raise ValueError(f"`proprio` must be [D] or [1,D], got shape {tuple(proprio.shape)}")
+                raise ValueError(
+                    f"`proprio` must be [D] or [1,D], got shape {tuple(proprio.shape)}"
+                )
             if proprio.shape[1] != self.proprio_dim:
-                raise ValueError(f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}")
+                raise ValueError(
+                    f"`proprio` last dim must be {self.proprio_dim}, got {proprio.shape[1]}"
+                )
             proprio = proprio.to(device=self.device, dtype=self.torch_dtype)
 
-        generator = None if seed is None else torch.Generator(device=rand_device).manual_seed(seed)
+        generator = (
+            None
+            if seed is None
+            else torch.Generator(device=rand_device).manual_seed(seed)
+        )
         latents_action = torch.randn(
             (1, action_horizon, self.action_expert.action_dim),
             generator=generator,
@@ -1335,21 +1297,31 @@ class BridgeWAM(torch.nn.Module):
         ).to(device=self.device, dtype=self.torch_dtype)
 
         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
-        first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
-        fuse_flag = bool(getattr(self.video_expert, "fuse_vae_embedding_in_latents", False))
+        first_frame_latents = self._encode_input_image_latents_tensor(
+            input_image=input_image, tiled=tiled
+        )
+        fuse_flag = bool(
+            getattr(self.video_expert, "fuse_vae_embedding_in_latents", False)
+        )
 
         use_prompt = prompt is not None
         use_context = context is not None or context_mask is not None
         if use_prompt and use_context:
-            raise ValueError("`prompt` and `context/context_mask` are mutually exclusive.")
+            raise ValueError(
+                "`prompt` and `context/context_mask` are mutually exclusive."
+            )
         if not use_prompt and not use_context:
-            raise ValueError("Either `prompt` or both `context/context_mask` must be provided.")
+            raise ValueError(
+                "Either `prompt` or both `context/context_mask` must be provided."
+            )
 
         if use_prompt:
             context, context_mask = self.encode_prompt(prompt)
         else:
             if context is None or context_mask is None:
-                raise ValueError("`context` and `context_mask` must be both provided together.")
+                raise ValueError(
+                    "`context` and `context_mask` must be both provided together."
+                )
             if context.ndim == 2:
                 context = context.unsqueeze(0)
             if context_mask.ndim == 1:
@@ -1358,8 +1330,12 @@ class BridgeWAM(torch.nn.Module):
                 raise ValueError(
                     f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                 )
-            context = context.to(device=self.device, dtype=self.torch_dtype, non_blocking=True)
-            context_mask = context_mask.to(device=self.device, dtype=torch.bool, non_blocking=True)
+            context = context.to(
+                device=self.device, dtype=self.torch_dtype, non_blocking=True
+            )
+            context_mask = context_mask.to(
+                device=self.device, dtype=torch.bool, non_blocking=True
+            )
         if proprio is not None:
             context, context_mask = self._append_proprio_to_context(
                 context=context,
@@ -1367,13 +1343,7 @@ class BridgeWAM(torch.nn.Module):
                 proprio=proprio,
             )
 
-        (
-            video_pre,
-            video_seq_len,
-            attention_mask,
-            video_kv_cache,
-            lbq_tokens,
-        ) = _profile_stage(
+        video_pre, lbq_tokens = _profile_stage(
             profile,
             "video_prefill_once",
             self.device,
@@ -1381,19 +1351,24 @@ class BridgeWAM(torch.nn.Module):
                 first_frame_latents=first_frame_latents,
                 context=context,
                 context_mask=context_mask,
-                action_seq_len=latents_action.shape[1],
                 fuse_vae_embedding_in_latents=fuse_flag,
             ),
         )
         if profile is not None:
-            profile["video_seq_len"] = int(video_seq_len)
-            profile["video_tokens_per_frame"] = int(video_pre["meta"]["tokens_per_frame"])
-            profile["video_grid_size"] = [int(x) for x in video_pre["meta"]["grid_size"]]
+            profile["video_seq_len"] = int(video_pre["tokens"].shape[1])
+            profile["video_tokens_per_frame"] = int(
+                video_pre["meta"]["tokens_per_frame"]
+            )
+            profile["video_grid_size"] = [
+                int(x) for x in video_pre["meta"]["grid_size"]
+            ]
             profile["action_seq_len"] = int(latents_action.shape[1])
             profile["action_horizon"] = int(action_horizon)
             profile["num_inference_steps"] = int(num_inference_steps)
-            if self.mot.latent_bridge_queries_enabled:
-                profile["latent_bridge_queries"] = self.mot.latent_bridge_queries_config()
+            if self.bridge.latent_bridge_queries_enabled:
+                profile["latent_bridge_queries"] = (
+                    self.bridge.latent_bridge_queries_config()
+                )
 
         action_conditioning = _profile_stage(
             profile,
@@ -1416,14 +1391,20 @@ class BridgeWAM(torch.nn.Module):
                 else action_conditioning["self_lbq_context"].shape[1]
             )
 
-        infer_timesteps_action, infer_deltas_action = self.infer_action_scheduler.build_inference_schedule(
-            num_inference_steps=num_inference_steps,
-            device=self.device,
-            dtype=latents_action.dtype,
-            shift_override=sigma_shift,
+        infer_timesteps_action, infer_deltas_action = (
+            self.infer_action_scheduler.build_inference_schedule(
+                num_inference_steps=num_inference_steps,
+                device=self.device,
+                dtype=latents_action.dtype,
+                shift_override=sigma_shift,
+            )
         )
-        for step_t_action, step_delta_action in zip(infer_timesteps_action, infer_deltas_action):
-            timestep_action = step_t_action.unsqueeze(0).to(dtype=latents_action.dtype, device=self.device)
+        for step_t_action, step_delta_action in zip(
+            infer_timesteps_action, infer_deltas_action
+        ):
+            timestep_action = step_t_action.unsqueeze(0).to(
+                dtype=latents_action.dtype, device=self.device
+            )
 
             pred_action_posi = _profile_stage(
                 profile,
@@ -1434,68 +1415,29 @@ class BridgeWAM(torch.nn.Module):
                     timestep_action=timestep_action,
                     action_cross_context=action_conditioning["cross_context"],
                     action_cross_mask=action_conditioning["cross_mask"],
-                    video_kv_cache=video_kv_cache,
-                    attention_mask=attention_mask,
-                    video_seq_len=video_seq_len,
                     self_lbq_context=action_conditioning["self_lbq_context"],
                 ),
                 append_ms=True,
             )
             pred_action = pred_action_posi
 
-            latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
+            latents_action = self.infer_action_scheduler.step(
+                pred_action, step_delta_action, latents_action
+            )
 
         return {
             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
         }
 
-    @torch.no_grad()
-    def infer(
-        self,
-        prompt: Optional[str],
-        input_image: torch.Tensor,
-        num_frames: int,
-        action: Optional[torch.Tensor] = None,
-        action_horizon: Optional[int] = None,
-        proprio: Optional[torch.Tensor] = None,
-        context: Optional[torch.Tensor] = None,
-        context_mask: Optional[torch.Tensor] = None,
-        negative_prompt: Optional[str] = None,
-        text_cfg_scale: float = 5.0,
-        action_cfg_scale: float = 1.0,
-        num_inference_steps: int = 20,
-        sigma_shift: Optional[float] = None,
-        seed: Optional[int] = None,
-        rand_device: str = "cpu",
-        tiled: bool = False,
-    ):
-        return self.infer_joint(
-            prompt=prompt,
-            input_image=input_image,
-            num_video_frames=num_frames,
-            action_horizon=action_horizon,
-            action=action,
-            proprio=proprio,
-            context=context,
-            context_mask=context_mask,
-            negative_prompt=negative_prompt,
-            text_cfg_scale=text_cfg_scale,
-            num_inference_steps=num_inference_steps,
-            sigma_shift=sigma_shift,
-            seed=seed,
-            rand_device=rand_device,
-            tiled=tiled,
-        )
-
     def save_checkpoint(self, path, optimizer=None, step=None):
         payload = {
-            "mot": self.mot.state_dict(),
+            "mot": self.bridge.state_dict(),
             "step": step,
             "torch_dtype": str(self.torch_dtype),
             "checkpoint_format_version": 2,
             "model_name": "bridgewam",
         }
-        lbq_config = self.mot.latent_bridge_queries_config()
+        lbq_config = self.bridge.latent_bridge_queries_config()
         if lbq_config is not None:
             payload["latent_bridge_queries"] = lbq_config
         action_architecture = self.action_expert.architecture_config()
@@ -1513,14 +1455,14 @@ class BridgeWAM(torch.nn.Module):
     def load_checkpoint(self, path, optimizer=None):
         payload = normalize_checkpoint_payload(torch.load(path, map_location="cpu"))
         checkpoint_lbq_config = payload.get("latent_bridge_queries")
-        current_lbq_config = self.mot.latent_bridge_queries_config()
+        current_lbq_config = self.bridge.latent_bridge_queries_config()
         normalized_checkpoint_lbq_config = None
         normalized_current_lbq_config = None
         if current_lbq_config is not None:
             normalized_current_lbq_config = (
-                self.mot.normalize_latent_bridge_queries_checkpoint_config(
+                self.bridge.normalize_latent_bridge_queries_checkpoint_config(
                     current_lbq_config,
-                    num_layers=self.mot.num_layers,
+                    num_layers=self.bridge.num_layers,
                 )
             )
         if checkpoint_lbq_config is not None and current_lbq_config is None:
@@ -1542,9 +1484,9 @@ class BridgeWAM(torch.nn.Module):
                     "multi-readout architecture; this 917 model uses one readout layer."
                 )
             normalized_checkpoint_lbq_config = (
-                self.mot.normalize_latent_bridge_queries_checkpoint_config(
+                self.bridge.normalize_latent_bridge_queries_checkpoint_config(
                     checkpoint_lbq_config,
-                    num_layers=self.mot.num_layers,
+                    num_layers=self.bridge.num_layers,
                 )
             )
 
@@ -1563,7 +1505,9 @@ class BridgeWAM(torch.nn.Module):
                 )
             checkpoint_action_architecture = dict(checkpoint_action_architecture)
             if checkpoint_action_architecture.get("lbqs_read_action", False):
-                raise ValueError("Checkpoint uses begin8.7 lbqs_read_action=true; the 917 architecture does not implement that route.")
+                raise ValueError(
+                    "Checkpoint uses begin8.7 lbqs_read_action=true; the 917 architecture does not implement that route."
+                )
             checkpoint_conditioning_mode = (
                 "text_state"
                 if normalized_checkpoint_lbq_config is None
@@ -1633,9 +1577,7 @@ class BridgeWAM(torch.nn.Module):
                 != normalized_current_lbq_config.get(key)
             }
             if mismatches:
-                raise ValueError(
-                    f"BridgeWAM checkpoint/config mismatch: {mismatches}."
-                )
+                raise ValueError(f"BridgeWAM checkpoint/config mismatch: {mismatches}.")
         if "mot" in payload:
             mot_state = dict(payload["mot"])
             migrated_legacy_state = False
@@ -1645,7 +1587,10 @@ class BridgeWAM(torch.nn.Module):
                 # loadable; it is still excluded from the forward route.
                 text_prefix = "mixtures.action.text_embedding."
                 missing_text_keys = []
-                for key, value in self.action_expert.text_embedding.state_dict().items():
+                for (
+                    key,
+                    value,
+                ) in self.action_expert.text_embedding.state_dict().items():
                     full_key = f"{text_prefix}{key}"
                     if full_key not in mot_state:
                         mot_state[full_key] = value
@@ -1668,17 +1613,36 @@ class BridgeWAM(torch.nn.Module):
 
             # Check coverage before copying tensors. Renamed/unknown keys must
             # never result in a successful partial baseline restore.
-            expected = self.mot.state_dict()
-            allowed_missing = {"action_video_kv_layer_mask"} if normalized_checkpoint_lbq_config is None else set()
-            if normalized_current_lbq_config is not None and normalized_checkpoint_lbq_config is None:
-                allowed_missing.update(k for k in expected if k.startswith(("latent_bridge_queries.", "mixtures.action.lbq_embedding.")))
+            expected = self.bridge.state_dict()
+            allowed_missing = (
+                {"action_video_kv_layer_mask"}
+                if normalized_checkpoint_lbq_config is None
+                else set()
+            )
+            if (
+                normalized_current_lbq_config is not None
+                and normalized_checkpoint_lbq_config is None
+            ):
+                allowed_missing.update(
+                    k
+                    for k in expected
+                    if k.startswith(
+                        ("latent_bridge_queries.", "mixtures.action.lbq_embedding.")
+                    )
+                )
             missing = set(expected) - set(mot_state) - allowed_missing
             unexpected = set(mot_state) - set(expected)
-            mismatched = [k for k in set(expected) & set(mot_state)
-                          if not torch.is_tensor(mot_state[k]) or expected[k].shape != mot_state[k].shape]
+            mismatched = [
+                k
+                for k in set(expected) & set(mot_state)
+                if not torch.is_tensor(mot_state[k])
+                or expected[k].shape != mot_state[k].shape
+            ]
             if missing or unexpected or mismatched:
-                raise ValueError(f"Checkpoint state mismatch: Missing keys: {sorted(missing)}; unexpected keys: {sorted(unexpected)}; shape mismatch: {sorted(mismatched)}.")
-            incompatible = self.mot.load_state_dict(mot_state, strict=False)
+                raise ValueError(
+                    f"Checkpoint state mismatch: Missing keys: {sorted(missing)}; unexpected keys: {sorted(unexpected)}; shape mismatch: {sorted(mismatched)}."
+                )
+            incompatible = self.bridge.load_state_dict(mot_state, strict=False)
             if normalized_checkpoint_lbq_config is not None:
                 if incompatible.missing_keys or incompatible.unexpected_keys:
                     raise ValueError(
@@ -1689,7 +1653,7 @@ class BridgeWAM(torch.nn.Module):
             if (
                 normalized_current_lbq_config is not None
                 and normalized_checkpoint_lbq_config is None
-                and self.mot.latent_bridge_queries_strict_training_scope
+                and self.bridge.latent_bridge_queries_strict_training_scope
             ):
                 allowed_missing = {"action_video_kv_layer_mask"}
                 critical_missing = [
@@ -1718,19 +1682,25 @@ class BridgeWAM(torch.nn.Module):
             raise ValueError(f"Checkpoint missing both `mot` and `dit` keys: {path}")
         if self.proprio_encoder is not None:
             if "proprio_encoder" in payload:
-                self.proprio_encoder.load_state_dict(payload["proprio_encoder"], strict=True)
+                self.proprio_encoder.load_state_dict(
+                    payload["proprio_encoder"], strict=True
+                )
             elif (
                 normalized_current_lbq_config is not None
-                and self.mot.latent_bridge_queries_strict_training_scope
+                and self.bridge.latent_bridge_queries_strict_training_scope
             ):
                 raise ValueError(
                     "BridgeWAM freezes proprio_encoder, but the baseline "
                     "checkpoint does not contain its trained weights."
                 )
             else:
-                logger.warning("Checkpoint has no `proprio_encoder` weights; keeping current `proprio_encoder` params.")
+                logger.warning(
+                    "Checkpoint has no `proprio_encoder` weights; keeping current `proprio_encoder` params."
+                )
         elif "proprio_encoder" in payload:
-            logger.warning("Checkpoint contains `proprio_encoder` weights but current model has `proprio_dim=None`; ignoring.")
+            logger.warning(
+                "Checkpoint contains `proprio_encoder` weights but current model has `proprio_dim=None`; ignoring."
+            )
 
         if optimizer is not None and "optimizer" in payload:
             if "mot" in payload and migrated_legacy_state:
@@ -1744,7 +1714,3 @@ class BridgeWAM(torch.nn.Module):
 
     def forward(self, *args, **kwargs):
         return self.training_loss(*args, **kwargs)
-
-
-# Historical class name: same object, no duplicated parameters.
-FastWAM = BridgeWAM

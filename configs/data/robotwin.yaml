@@ -1,7 +1,7 @@
 train:
   _target_: bridgewam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
-    - ./data/robotwin2.0/robotwin2.0
+    - ${oc.env:BRIDGEWAM_DATA_ROOT,./data}/robotwin2.0/robotwin2.0
   shape_meta:
     images:
       - key: cam_high
@@ -28,7 +28,7 @@ train:
   camera_key: null
   val_set_proportion: 0.01
   is_training_set: true
-  pretrained_norm_stats: ./data/robotwin2.0/dataset_stats.json
+  pretrained_norm_stats: ${oc.env:BRIDGEWAM_DATA_ROOT,./data}/robotwin2.0/dataset_stats.json
   skip_padding_as_possible: false
   concat_multi_camera: "robotwin"
   processor:
@@ -58,13 +58,13 @@ train:
       - _target_: bridgewam.datasets.lerobot.transforms.image.ToTensor
       - _target_: torchvision.transforms.Resize
         size: [240, 320]
-  text_embedding_cache_dir: ./data/text_embeds_cache/robotwin
+  text_embedding_cache_dir: ${oc.env:BRIDGEWAM_DATA_ROOT,./data}/text_embeds_cache/robotwin
   context_len: 128
 
 val:
   _target_: bridgewam.datasets.lerobot.robot_video_dataset.RobotVideoDataset
   dataset_dirs:
-    - ./data/robotwin2.0/robotwin2.0/
+    - ${oc.env:BRIDGEWAM_DATA_ROOT,./data}/robotwin2.0/robotwin2.0/
   shape_meta:
     images:
       - key: cam_high
@@ -91,7 +91,7 @@ val:
   camera_key: null
   val_set_proportion: 0.01
   is_training_set: false
-  pretrained_norm_stats: ./data/robotwin2.0/dataset_stats.json
+  pretrained_norm_stats: ${oc.env:BRIDGEWAM_DATA_ROOT,./data}/robotwin2.0/dataset_stats.json
   skip_padding_as_possible: false
   concat_multi_camera: "robotwin"
   processor:
@@ -121,5 +121,5 @@ val:
       - _target_: bridgewam.datasets.lerobot.transforms.image.ToTensor
       - _target_: torchvision.transforms.Resize
         size: [240, 320]
-  text_embedding_cache_dir: ./data/text_embeds_cache/robotwin
+  text_embedding_cache_dir: ${oc.env:BRIDGEWAM_DATA_ROOT,./data}/text_embeds_cache/robotwin
   context_len: 128

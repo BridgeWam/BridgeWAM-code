@@ -1,10 +1,16 @@
+# Prefer this checkout even when another BridgeWAM is installed.
+import sys
+from pathlib import Path
+
+_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(_SOURCE_ROOT))
+
 import hashlib
 import json
 import logging
 import os
 import re
 import uuid
-from pathlib import Path
 from typing import Any
 
 import hydra

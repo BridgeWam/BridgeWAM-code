@@ -1,20 +1,16 @@
-# Canonical BridgeWAM model factory. The legacy fastwam.yaml filename remains
-# supported for existing launch commands.
-_target_: bridgewam.runtime.create_bridgewam
+_target_: bridgewam.models.wan22.factory.create_bridgewam
 model_id: Wan-AI/Wan2.2-TI2V-5B
 tokenizer_model_id: Wan-AI/Wan2.1-T2V-1.3B
 tokenizer_max_len: 128
 load_text_encoder: false
 proprio_dim: ${data.train.processor.proprio_output_dim}
 redirect_common_files: true
-mot_checkpoint_mixed_attn: true
-# Explicit fallback: model=fastwam_baseline resets LBQ, routing and ActionDiT
-# topology together; load a matching baseline checkpoint afterward.
+checkpoint_attention: true
 # BridgeWAM LBQ tokens remain full Q/K/V participants in Video DiT. Their
 # readout conditions ActionDiT through cross-attention or mixed self-attention.
 latent_bridge_queries:
-  enabled: false
-  generation_coupling: none
+  enabled: true
+  generation_coupling: future_video_reads_lbq
   injection_mode: lbq_only
   num_lbqs: 32
   start_layer: 0
@@ -22,22 +18,12 @@ latent_bridge_queries:
   lbq_attention: bidirectional
   lbq_rope_mode: identity
   eps: 1.0e-06
-  preserve_direct_video_kv: true
+  preserve_direct_video_kv: false
   # true: adapter-only Latent Bridge Queries training; false: full expert finetuning.
-  freeze_video_expert: true
+  freeze_video_expert: false
   train_action_cross_attention: true
   action_cross_attention_lr_scale: 1.0
   strict_training_scope: false
-# Structural Action-query -> Video-K/V routing. Disabled for existing experiments.
-# The persistent layer mask is saved inside the MoT checkpoint.
-action_video_kv_routing:
-  enabled: false
-  keep_layers: null
-  keep_layer_start: null
-  keep_layer_end: null
-  drop_layers: null
-  drop_layer_start: null
-  drop_layer_end: null
 action_dit_pretrained_path: checkpoints/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt
 skip_dit_load_from_pretrain: false
 
@@ -58,7 +44,7 @@ video_dit_config:
   require_clip_embedding: false
   require_vae_embedding: false
   fuse_vae_embedding_in_latents: true
-  use_gradient_checkpointing: ${model.mot_checkpoint_mixed_attn}
+  use_gradient_checkpointing: ${model.checkpoint_attention}
   video_attention_mask_mode: "first_frame_causal" # default
   action_conditioned: false
   action_dim: ${data.train.processor.action_output_dim}
@@ -70,14 +56,14 @@ action_dit_config:
   ffn_dim: 4096
   num_heads: 24
   attn_head_dim: 128
-  num_layers: 30
+  num_layers: 2
   text_dim: 4096
   freq_dim: 256
   eps: 1.0e-06
-  use_gradient_checkpointing: ${model.mot_checkpoint_mixed_attn}
+  use_gradient_checkpointing: ${model.checkpoint_attention}
   # alternating_cross_self uses Cross-only even layers and Self-only odd layers.
-  architecture: full
-  add_pos_embed: false
+  architecture: alternating_cross_self
+  add_pos_embed: true
   max_action_horizon: 1024
 
 video_scheduler:

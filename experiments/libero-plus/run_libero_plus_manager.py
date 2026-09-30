@@ -50,7 +50,7 @@ def _collect_worker_overrides() -> list[str]:
 def _resolve_worker_task_choice() -> str:
     task_choice = HydraConfig.get().runtime.choices.get("task")
     if task_choice is None or not str(task_choice).strip():
-        raise ValueError("Pass a BridgeWAM task config with task=..., for example task=libero_uncond_2cam224_1e-4.")
+        raise ValueError("Pass a BridgeWAM task config with task=..., for example task=libero_uncond_2cam224_lbqs_only_2layer_alternating_cross_self_fullfinetune_1e-4.")
     return str(task_choice)
 
 

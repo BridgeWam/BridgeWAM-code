@@ -4,13 +4,13 @@ from typing import Any, Optional
 
 import torch
 
-from latent_bridge_queries import LatentBridgeQueries
+from bridgewam.models.wan22.lbq import LatentBridgeQueries
 
-from ..mot import MoT, logger
+from ..bridge_of_experts import BridgeOfExperts, logger
 
 
-class TaggedAblationMoT(MoT):
-    """Ordinary BridgeWAM MoT with an experiment identity in checkpoints."""
+class AblationBridge(BridgeOfExperts):
+    """BridgeWAM backbone with an experiment identity in checkpoints."""
 
     def __init__(self, *args, ablation_type: str, **kwargs):
         self.ablation_type = str(ablation_type)
@@ -26,12 +26,14 @@ class TaggedAblationMoT(MoT):
         return config
 
 
-class FrozenVideoAblationMoT(TaggedAblationMoT):
+class FrozenVideoBridge(AblationBridge):
     """Freeze Video/proprio while training every Action parameter and Latent Bridge Queries."""
 
     def configure_lbq_trainable_parameters(self) -> None:
         if not self.latent_bridge_queries_enabled or self.latent_bridge_queries is None:
-            raise RuntimeError("Frozen-Video ablation requires Video Latent Bridge Queries.")
+            raise RuntimeError(
+                "Frozen-Video ablation requires Video Latent Bridge Queries."
+            )
 
         self.requires_grad_(False)
         self.mixtures["video"].eval()
@@ -58,7 +60,7 @@ class FrozenVideoAblationMoT(TaggedAblationMoT):
         ]
 
 
-class FullVideoLBQAblationMoT(TaggedAblationMoT):
+class FullVideoBridge(AblationBridge):
     """Latent Bridge Queries variant that can read all frames in an IDM condition branch."""
 
     def forward_video_with_full_video_lbqs(
@@ -70,8 +72,7 @@ class FullVideoLBQAblationMoT(TaggedAblationMoT):
         video_context_payload: Optional[dict],
         video_attention_mask: torch.Tensor,
         video_tokens_per_frame: int,
-        collect_video_kv_cache: bool = False,
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]], torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         return self._forward_video_with_scoped_lbqs(
             video_tokens=video_tokens,
             video_freqs=video_freqs,
@@ -80,7 +81,6 @@ class FullVideoLBQAblationMoT(TaggedAblationMoT):
             video_attention_mask=video_attention_mask,
             video_tokens_per_frame=video_tokens_per_frame,
             lbq_source_token_count=int(video_tokens.shape[1]),
-            collect_video_kv_cache=collect_video_kv_cache,
         )
 
     def _forward_video_with_scoped_lbqs(
@@ -93,10 +93,11 @@ class FullVideoLBQAblationMoT(TaggedAblationMoT):
         video_attention_mask: torch.Tensor,
         video_tokens_per_frame: int,
         lbq_source_token_count: int,
-        collect_video_kv_cache: bool,
-    ) -> tuple[torch.Tensor, list[dict[str, torch.Tensor]], torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.latent_bridge_queries_enabled or self.latent_bridge_queries is None:
-            raise RuntimeError("Full-video LBQ forward requires Video Latent Bridge Queries.")
+            raise RuntimeError(
+                "Full-video LBQ forward requires Video Latent Bridge Queries."
+            )
         if video_attention_mask.ndim != 2 or video_attention_mask.shape != (
             video_tokens.shape[1],
             video_tokens.shape[1],
@@ -119,7 +120,6 @@ class FullVideoLBQAblationMoT(TaggedAblationMoT):
         expert = self.mixtures["video"]
         x_video = video_tokens
         lbq_tokens = None
-        kv_cache: list[dict[str, torch.Tensor]] = []
         lbq_attention_mask = torch.ones(
             (
                 self.latent_bridge_queries.num_lbqs,
@@ -178,13 +178,16 @@ class FullVideoLBQAblationMoT(TaggedAblationMoT):
             )
             couple_future_video = (
                 lbq_active
-                and self.latent_bridge_queries_generation_coupling == "future_video_reads_lbq"
+                and self.latent_bridge_queries_generation_coupling
+                == "future_video_reads_lbq"
                 and first_frame_tokens < x_video.shape[1]
             )
             # Future rows are computed below with LBQ K/V. Do not first compute
             # the Video-only rows that would immediately be discarded. Keep all
             # Video keys and the original mask for the retained query rows.
-            video_query_count = first_frame_tokens if couple_future_video else x_video.shape[1]
+            video_query_count = (
+                first_frame_tokens if couple_future_video else x_video.shape[1]
+            )
             mixed_video = self._mixed_attention(
                 q_cat=q_video[:, :video_query_count],
                 k_cat=k_video,
@@ -273,8 +276,6 @@ class FullVideoLBQAblationMoT(TaggedAblationMoT):
                 mixed_slice=mixed_video,
                 context_payload=video_context_payload,
             )
-            if collect_video_kv_cache:
-                kv_cache.append({"k": k_video, "v": v_video})
 
             if lbq_state is not None:
                 (
@@ -300,29 +301,31 @@ class FullVideoLBQAblationMoT(TaggedAblationMoT):
 
         if lbq_tokens is None:
             raise RuntimeError("Latent Bridge Queries tokens were never initialized.")
-        return x_video, kv_cache, lbq_tokens
+        return x_video, lbq_tokens
 
 
-class JointLBQAblationMoT(MoT):
-    """Thirty-layer synchronous Video/LBQ/Action MoT for the Joint ablation."""
+class JointAttentionBridge(BridgeOfExperts):
+    """Thirty-layer synchronous Video/LBQ/Action attention for the Joint ablation."""
 
     def __init__(
         self,
         *,
         mixtures,
         latent_bridge_queries: dict[str, Any],
-        mot_checkpoint_mixed_attn: bool,
+        checkpoint_attention: bool,
         ablation_type: str,
     ):
         self.ablation_type = str(ablation_type)
         super().__init__(
             mixtures=mixtures,
-            mot_checkpoint_mixed_attn=mot_checkpoint_mixed_attn,
-            action_video_kv_routing=None,
+            checkpoint_attention=checkpoint_attention,
+            _joint_attention=True,
             latent_bridge_queries=None,
         )
         if not bool(self._cfg_get(latent_bridge_queries, "enabled", False)):
-            raise ValueError("Joint ablation requires `latent_bridge_queries.enabled=true`.")
+            raise ValueError(
+                "Joint ablation requires `latent_bridge_queries.enabled=true`."
+            )
         if self.action_num_layers != self.video_num_layers:
             raise ValueError(
                 "Joint ablation requires equal Video and Action depth, got "
@@ -345,7 +348,9 @@ class JointLBQAblationMoT(MoT):
             num_video_layers=self.video_num_layers,
             num_lbqs=int(self._cfg_get(latent_bridge_queries, "num_lbqs", 32)),
             start_layer=int(self._cfg_get(latent_bridge_queries, "start_layer", 0)),
-            readout_layer=int(self._cfg_get(latent_bridge_queries, "readout_layer", -1)),
+            readout_layer=int(
+                self._cfg_get(latent_bridge_queries, "readout_layer", -1)
+            ),
             lbq_attention=str(
                 self._cfg_get(latent_bridge_queries, "lbq_attention", "bidirectional")
             ),
@@ -373,7 +378,9 @@ class JointLBQAblationMoT(MoT):
             "Initialized %s: synchronous Video/LBQ/Action attention; "
             "direct cross-stream K/V enabled; video_layers=%d action_layers=%d "
             "queries=%d training_scope=full_expert_finetune",
-            type(self).__name__, self.video_num_layers, self.action_num_layers,
+            type(self).__name__,
+            self.video_num_layers,
+            self.action_num_layers,
             self.latent_bridge_queries.num_lbqs,
         )
 

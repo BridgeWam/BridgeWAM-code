@@ -302,7 +302,3 @@ class BridgeWAMProcessor(BaseProcessor):
         start_obs_step = self.num_obs_steps - 1
         data["action"] = dict_apply(data["action"], lambda x: x[:, start_obs_step:, :])
         return data
-
-
-# Historical class name: same object, no duplicated parameters.
-FastWAMProcessor = BridgeWAMProcessor

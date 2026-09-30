@@ -3,7 +3,7 @@ import numpy as np
 from pathlib import Path
 from typing import List, Literal, Dict, Optional, Any, DefaultDict
 from tqdm import tqdm
-from .lerobot.lerobot_dataset import LeRobotDatasetMetadata, MultiLeRobotDataset
+from .backend.lerobot_dataset import LeRobotDatasetMetadata, MultiLeRobotDataset
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback

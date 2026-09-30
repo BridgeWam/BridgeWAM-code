@@ -81,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--entity",
         default=None,
-        help="W&B entity/workspace; defaults to the locally configured account",
+        help="W&B entity/workspace (defaults to your configured W&B account)",
     )
     parser.add_argument(
         "--project",
@@ -165,4 +165,4 @@ if __name__ == "__main__":
 
 
 #   python scripts/backfill_wandb_from_log.py train.log \
-#     --name training-loss-backfill
+#     --name exp1-drop00-05-loss-backfill

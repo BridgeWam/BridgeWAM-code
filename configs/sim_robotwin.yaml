@@ -2,7 +2,7 @@
 
 defaults:
   - train
-  - override /task: robotwin_uncond_3cam_384_1e-4
+  - override /task: robotwin_bridgewam_3cam384_lbq32_2layer_1e-4
   - _self_
 
 ckpt: null

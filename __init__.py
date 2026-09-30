@@ -1,3 +1,3 @@
-"""Standalone Wan2.2-TI2V-5B package."""
+"""BridgeWAM source distribution; install the package from src/bridgewam."""
 
 __all__ = []

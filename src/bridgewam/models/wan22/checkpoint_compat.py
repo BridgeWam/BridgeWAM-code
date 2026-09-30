@@ -95,7 +95,7 @@ def normalize_checkpoint_payload(payload):
     if not isinstance(payload, Mapping):
         raise ValueError('Checkpoint payload must be a mapping of weights and metadata.')
     result = dict(payload)
-    # Named wrappers may contain a native payload or just its MoT state.
+    # Named wrappers may contain a native payload or just its backbone state.
     for name in ('bridgewam', 'fastwam', 'boe'):
         if name not in result:
             continue
@@ -140,7 +140,7 @@ def normalize_checkpoint_payload(payload):
             # load_checkpoint validates them against the actual target model.
             _put(mot, key, value)
         if not mot:
-            raise ValueError('Export contains no MoT weights.')
+            raise ValueError('Export contains no backbone weights.')
         result['mot'] = mot
         if proprio:
             if 'proprio_encoder' in result:

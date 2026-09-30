@@ -24,9 +24,7 @@ EVAL_STEP_LIMIT_FILE = PROJECT_ROOT / "third_party" / "RoboTwin" / "task_config"
 TERMINATE_TIMEOUT_SEC = 10
 POLL_INTERVAL_SEC = 2
 TMUX_INNER_ENV = "BRIDGEWAM_ROBOTWIN_MANAGER_IN_TMUX"
-LEGACY_TMUX_INNER_ENV = "FASTWAM_ROBOTWIN_MANAGER_IN_TMUX"
 TMUX_DISABLE_ENV = "BRIDGEWAM_ROBOTWIN_MANAGER_NO_TMUX"
-LEGACY_TMUX_DISABLE_ENV = "FASTWAM_ROBOTWIN_MANAGER_NO_TMUX"
 TMUX_SESSION_ENV = "ROBOTWIN_TMUX_SESSION_NAME"
 TMUX_LOG_FILENAME = "robotwin_manager.log"
 TMUX_RUNTIME_FILENAME = "tmux_runtime.txt"
@@ -80,8 +78,7 @@ def _resolve_ckpt_tag(ckpt_path: Path) -> str:
 
 
 def _env_flag_enabled(name: str) -> bool:
-    legacy = {TMUX_INNER_ENV: LEGACY_TMUX_INNER_ENV, TMUX_DISABLE_ENV: LEGACY_TMUX_DISABLE_ENV}
-    value = os.environ.get(name, os.environ.get(legacy.get(name, ""), ""))
+    value = os.environ.get(name, "")
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 

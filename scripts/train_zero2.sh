@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NPROC_PER_NODE="${1:?Usage: bash scripts/train.sh <nproc_per_node> [hydra_overrides...]}"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export PYTHONPATH="${PROJECT_ROOT}/src:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+cd "${PROJECT_ROOT}"
+
+NPROC_PER_NODE="${1:?Usage: bash scripts/train_zero2.sh <nproc_per_node> [hydra_overrides...]}"
 shift
 
 EXTRA_ARGS=("$@")

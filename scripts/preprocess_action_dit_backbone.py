@@ -1,5 +1,11 @@
-import argparse
+# Prefer this checkout even when another BridgeWAM is installed.
+import sys
 from pathlib import Path
+
+_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+sys.path.insert(0, str(_SOURCE_ROOT))
+
+import argparse
 from typing import Any
 
 import torch
@@ -18,7 +24,9 @@ def _parse_dtype(name: str) -> torch.dtype:
         return torch.float16
     if value == "bfloat16":
         return torch.bfloat16
-    raise ValueError(f"Unsupported dtype: {name}. Expected one of: float32, float16, bfloat16.")
+    raise ValueError(
+        f"Unsupported dtype: {name}. Expected one of: float32, float16, bfloat16."
+    )
 
 
 def _parse_bool(name: str) -> bool:
@@ -58,7 +66,9 @@ def _interpolate_last_dim(tensor: torch.Tensor, new_size: int) -> torch.Tensor:
     return flat.reshape(*tensor.shape[:-1], new_size)
 
 
-def _resize_tensor_to_shape(src: torch.Tensor, target_shape: tuple[int, ...]) -> torch.Tensor:
+def _resize_tensor_to_shape(
+    src: torch.Tensor, target_shape: tuple[int, ...]
+) -> torch.Tensor:
     if tuple(src.shape) == tuple(target_shape):
         return src
 
@@ -106,14 +116,20 @@ def _load_model_config(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     video_cfg = OmegaConf.to_container(cfg.video_dit_config, resolve=False)
     action_cfg = OmegaConf.to_container(cfg.action_dit_config, resolve=False)
     if not isinstance(video_cfg, dict) or not isinstance(action_cfg, dict):
-        raise ValueError("`video_dit_config` and `action_dit_config` must resolve to dicts.")
+        raise ValueError(
+            "`video_dit_config` and `action_dit_config` must resolve to dicts."
+        )
 
     if _is_unresolved_interpolation(video_cfg.get("action_dim")):
-        print("[WARN] `video_dit_config.action_dim` is unresolved; defaulting to 7 for preprocessing.")
+        print(
+            "[WARN] `video_dit_config.action_dim` is unresolved; defaulting to 7 for preprocessing."
+        )
         video_cfg["action_dim"] = 7
 
     if _is_unresolved_interpolation(action_cfg.get("action_dim")):
-        print("[WARN] `action_dit_config.action_dim` is unresolved; defaulting to 7 for preprocessing.")
+        print(
+            "[WARN] `action_dit_config.action_dim` is unresolved; defaulting to 7 for preprocessing."
+        )
         action_cfg["action_dim"] = 7
 
     for key in ["num_heads", "attn_head_dim", "num_layers", "text_dim", "freq_dim"]:
@@ -136,14 +152,43 @@ def _require_float_config(cfg: dict[str, Any], key: str) -> float:
     return float(value)
 
 
+def _full_depth_backbone_config(video_cfg: dict, action_cfg: dict) -> dict:
+    """Build the Wan-derived initialization artifact, independently of head depth.
+
+    BridgeWAM loads its selected Action layers from this full-depth artifact.
+    This is weight preprocessing, not a second model or inference topology.
+    """
+    result = dict(action_cfg)
+    result.update(
+        num_layers=int(video_cfg["num_layers"]),
+        architecture="full",
+        conditioning_mode="text_state",
+        add_pos_embed=False,
+    )
+    result.pop("lbq_dim", None)
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Preprocess ActionDiT backbone weights from WanVideoDiT and save as .pt payload."
     )
-    parser.add_argument("--model-config", required=True, help="Path to model yaml, e.g. configs/model/bridgewam.yaml")
-    parser.add_argument("--output", required=True, help="Output .pt path for preprocessed ActionDiT backbone.")
-    parser.add_argument("--device", default="cpu", help="Device for loading model and preprocessing.")
-    parser.add_argument("--dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument(
+        "--model-config",
+        required=True,
+        help="Path to model yaml, e.g. configs/model/bridgewam.yaml",
+    )
+    parser.add_argument(
+        "--output",
+        required=True,
+        help="Output .pt path for preprocessed ActionDiT backbone.",
+    )
+    parser.add_argument(
+        "--device", default="cpu", help="Device for loading model and preprocessing."
+    )
+    parser.add_argument(
+        "--dtype", default="float32", choices=["float32", "float16", "bfloat16"]
+    )
     parser.add_argument(
         "--apply-alpha-scaling",
         default="true",
@@ -157,17 +202,29 @@ def main() -> None:
     apply_alpha_scaling = _parse_bool(args.apply_alpha_scaling)
 
     video_cfg, action_cfg, cfg = _load_model_config(model_config_path)
+    action_cfg = _full_depth_backbone_config(video_cfg, action_cfg)
     torch_dtype = _parse_dtype(args.dtype)
     redirect_common_files = _parse_bool(cfg.get("redirect_common_files", False))
 
-    int_fields = ["hidden_dim", "action_dim", "ffn_dim", "num_layers", "num_heads", "attn_head_dim", "text_dim", "freq_dim"]
+    int_fields = [
+        "hidden_dim",
+        "action_dim",
+        "ffn_dim",
+        "num_layers",
+        "num_heads",
+        "attn_head_dim",
+        "text_dim",
+        "freq_dim",
+    ]
     for key in int_fields:
         action_cfg[key] = _require_int_config(action_cfg, key)
     action_cfg["eps"] = _require_float_config(action_cfg, "eps")
 
-    print(f"[INFO] Loaded model config from {model_config_path}. "
-          f"Preprocessing ActionDiT backbone with dtype={torch_dtype} on device={args.device}, "
-          f"apply_alpha_scaling={apply_alpha_scaling}.")
+    print(
+        f"[INFO] Loaded model config from {model_config_path}. "
+        f"Preprocessing ActionDiT backbone with dtype={torch_dtype} on device={args.device}, "
+        f"apply_alpha_scaling={apply_alpha_scaling}."
+    )
     components = load_wan22_ti2v_5b_components(
         device=args.device,
         torch_dtype=torch_dtype,
@@ -180,9 +237,13 @@ def main() -> None:
 
     action_expert = ActionDiT(**action_cfg).to(device=args.device, dtype=torch_dtype)
     if int(action_cfg["num_heads"]) != int(video_expert.num_heads):
-        raise ValueError("ActionDiT `num_heads` must match video expert for MoT mixed attention.")
+        raise ValueError(
+            "ActionDiT `num_heads` must match video expert for shared attention projections."
+        )
     if int(action_cfg["attn_head_dim"]) != int(video_expert.attn_head_dim):
-        raise ValueError("ActionDiT `attn_head_dim` must match video expert for MoT mixed attention.")
+        raise ValueError(
+            "ActionDiT `attn_head_dim` must match video expert for shared attention projections."
+        )
     if int(action_cfg["num_layers"]) != int(len(video_expert.blocks)):
         raise ValueError("ActionDiT `num_layers` must match video expert.")
 
@@ -203,11 +264,17 @@ def main() -> None:
             copied += 1
         else:
             value = _resize_tensor_to_shape(src, tuple(target.shape))
-            if apply_alpha_scaling and src.ndim >= 2 and src.shape[-1] != target.shape[-1]:
+            if (
+                apply_alpha_scaling
+                and src.ndim >= 2
+                and src.shape[-1] != target.shape[-1]
+            ):
                 alpha = (float(src.shape[-1]) / float(target.shape[-1])) ** 0.5
                 value = value.to(torch.float32) * alpha
             interpolated += 1
-        backbone_state_dict[key] = value.detach().to(dtype=target.dtype, device="cpu").contiguous()
+        backbone_state_dict[key] = (
+            value.detach().to(dtype=target.dtype, device="cpu").contiguous()
+        )
 
     payload = {
         "policy": {

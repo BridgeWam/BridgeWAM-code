@@ -195,7 +195,6 @@ class Resample(nn.Module):
         nn.init.zeros_(conv.bias.data)
 
 
-
 def patchify(x, patch_size):
     if patch_size == 1:
         return x
@@ -837,7 +836,6 @@ class Decoder3d(nn.Module):
         return x, feat_cache, feat_idx
 
 
-
 class Decoder3d_38(nn.Module):
 
     def __init__(self,
@@ -1221,10 +1219,7 @@ class WanVideoVAE(nn.Module):
         for video in videos:
             video = video.unsqueeze(0)
             if tiled:
-                raise NotImplementedError("Tiled encoding is not allowed yet.")
-                tile_size = (tile_size[0] * self.upsampling_factor, tile_size[1] * self.upsampling_factor)
-                tile_stride = (tile_stride[0] * self.upsampling_factor, tile_stride[1] * self.upsampling_factor)
-                hidden_state = self.tiled_encode(video, device, tile_size, tile_stride)
+                raise ValueError("Wan2.2 VAE encoding requires tiled=false.")
             else:
                 hidden_state = self.single_encode(video, device)
             hidden_state = hidden_state.squeeze(0)
@@ -1254,9 +1249,7 @@ class WanVideoVAE(nn.Module):
 
 
 class WanVideoVAEStateDictConverter:
-
-    def __init__(self):
-        pass
+    """Translate the supported upstream VAE weight format."""
 
     def from_civitai(self, state_dict):
         state_dict_ = {}

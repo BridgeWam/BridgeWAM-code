@@ -10,7 +10,7 @@ from .wan_video_dit import (
     CrossAttention,
     DiTBlock,
     SelfAttention,
-    flash_attention,
+    multihead_attention,
     modulate,
     rope_apply,
     sinusoidal_embedding_1d,
@@ -163,7 +163,7 @@ class ActionMixSelfAttention(SelfAttention):
                 lbq_context.shape[1],
             )
 
-        readout = flash_attention(
+        readout = multihead_attention(
             q=q_action,
             k=k,
             v=v,
@@ -801,7 +801,7 @@ class ActionDiT(nn.Module):
                 block_kwargs["lbq_context"] = conditioning["self_lbq_context"]
             elif conditioning["self_lbq_context"] is not None:
                 raise RuntimeError(
-                    "Full ActionDiT mixed LBQ self-attention is executed by MoT; "
+                    "Full ActionDiT mixed LBQ self-attention is executed by BridgeOfExperts; "
                     "use the BridgeWAM forward path instead of standalone ActionDiT."
                 )
             x = gradient_checkpoint_forward(

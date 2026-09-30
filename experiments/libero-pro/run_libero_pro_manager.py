@@ -32,7 +32,7 @@ def run_workers(cfg, tasks, output: Path):
     log_dir = output / "task_logs"
     log_dir.mkdir(exist_ok=True)
     worker = Path(__file__).with_name("eval_libero_pro_single.py")
-    python = os.environ.get("BRIDGEWAM_PYTHON") or os.environ.get("FASTWAM_PYTHON") or sys.executable
+    python = os.environ.get("BRIDGEWAM_PYTHON") or sys.executable
 
     def consume(slot):
         gpu_index = slot // concurrency

@@ -26,14 +26,13 @@ run_libero_eval() {
     export OUTPUT_DIR  # Use run_id as the output subdirectory
     SESSION_NAME=${LIBERO_TMUX_SESSION_NAME:-"libero_${RUN_ID}_$$"}
     SESSION_NAME=$(printf '%s' "$SESSION_NAME" | tr -c '[:alnum:]_.-' '_')
-    LIBERO_GPU_LOCK_DIR=${LIBERO_GPU_LOCK_DIR:-"${XDG_RUNTIME_DIR:-$HOME/.cache}/bridgewam/libero_gpu_locks"}
+    LIBERO_GPU_LOCK_DIR=${LIBERO_GPU_LOCK_DIR:-"$ROOT_DIR/.bridgewam_runtime/libero_gpu_locks"}
     MANAGER_RUNTIME_FILE="$OUTPUT_DIR/manager_runtime.txt"
     SESSION_CREATED=0
     GPU_LOCK_FDS=()
     EXP_NAME=${EXP_NAME:-""}
     export EXP_NAME
-    BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-${FASTWAM_PYTHON:-"$(command -v python)"}}
-    FASTWAM_PYTHON="$BRIDGEWAM_PYTHON"
+    BRIDGEWAM_PYTHON=${BRIDGEWAM_PYTHON:-"$(command -v python)"}
     LIBERO_ROOT=${LIBERO_ROOT:-"$ROOT_DIR/LIBERO"}
     EVAL_SCRIPT=${EVAL_SCRIPT:-"experiments/libero/eval_libero_single.py"}
     SUMMARY_SCRIPT=${SUMMARY_SCRIPT:-"experiments/libero/summarize_results.py"}
@@ -43,7 +42,7 @@ run_libero_eval() {
     MUJOCO_GL=${MUJOCO_GL:-"egl"}
     PYOPENGL_PLATFORM=${PYOPENGL_PLATFORM:-"egl"}
     NVIDIA_DRIVER_CAPABILITIES=${NVIDIA_DRIVER_CAPABILITIES:-"all"}
-    export BRIDGEWAM_PYTHON FASTWAM_PYTHON LIBERO_ROOT EVAL_SCRIPT SUMMARY_SCRIPT LIBERO_CONFIG_PATH DIFFSYNTH_MODEL_BASE_PATH DIFFSYNTH_SKIP_DOWNLOAD MUJOCO_GL PYOPENGL_PLATFORM NVIDIA_DRIVER_CAPABILITIES
+    export BRIDGEWAM_PYTHON LIBERO_ROOT EVAL_SCRIPT SUMMARY_SCRIPT LIBERO_CONFIG_PATH DIFFSYNTH_MODEL_BASE_PATH DIFFSYNTH_SKIP_DOWNLOAD MUJOCO_GL PYOPENGL_PLATFORM NVIDIA_DRIVER_CAPABILITIES
 
     echo "EXP_NAME: $EXP_NAME"
     echo "BRIDGEWAM_PYTHON: $BRIDGEWAM_PYTHON"
@@ -60,8 +59,8 @@ run_libero_eval() {
         echo "Error: flock is required for cross-manager GPU locking."
         exit 1
     fi
-    if [ ! -x "$FASTWAM_PYTHON" ]; then
-        echo "Error: BRIDGEWAM_PYTHON is not executable: $FASTWAM_PYTHON"
+    if [ ! -x "$BRIDGEWAM_PYTHON" ]; then
+        echo "Error: BRIDGEWAM_PYTHON is not executable: $BRIDGEWAM_PYTHON"
         exit 1
     fi
     if [ ! -f "$ROOT_DIR/$EVAL_SCRIPT" ] || [ ! -f "$ROOT_DIR/$SUMMARY_SCRIPT" ]; then
@@ -458,7 +457,7 @@ run_libero_eval() {
             export PYOPENGL_PLATFORM=$PYOPENGL_PLATFORM && \
             export NVIDIA_DRIVER_CAPABILITIES=$NVIDIA_DRIVER_CAPABILITIES && \
             STATUS_FILE='$status_file' LOG_FILE='$log_file' RESULT_FILE='$result_file' && \
-            CUDA_VISIBLE_DEVICES=$gpu_id $FASTWAM_PYTHON $EVAL_SCRIPT \
+            CUDA_VISIBLE_DEVICES=$gpu_id $BRIDGEWAM_PYTHON $EVAL_SCRIPT \
             task=$CONFIG ckpt=$CKPT \
             EVALUATION.task_suite_name=$suite EVALUATION.task_id=$task_id gpu_id=$gpu_id \
             EVALUATION.num_trials=$NUM_TRIALS EVALUATION.output_dir=$OUTPUT_DIR $EXTRA_ARGS > \"\$LOG_FILE\" 2>&1; \

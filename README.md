@@ -1,324 +1,285 @@
 # BridgeWAM
 
-BridgeWAM connects a pretrained video diffusion backbone to an action diffusion
-head through **Latent Bridge Queries (LBQs)**. This repository contains model
-implementations, training configurations, checkpoint compatibility utilities, and
-simulation evaluation entry points for LIBERO, LIBERO-Plus, LIBERO-Pro, and RoboTwin.
+BridgeWAM connects pretrained video and action experts through Latent Bridge
+Queries (LBQs). This source distribution contains the model implementation,
+training and evaluation entrypoints, task configurations, and regression tests.
+Datasets, pretrained weights, simulator assets, private experiment records, and
+local connection settings are not included.
 
-## Scope of this release
+## Supported model and execution paths
 
-This is a source release. Datasets, pretrained weights, trained checkpoints,
-simulation assets, experiment logs, and the full regression test suite are not
-included. LIBERO environments must be installed separately.
-
-**The bundled `third_party/RoboTwin` tree contains empty placeholder files, not a
-working simulator.** Restore a complete compatible RoboTwin installation and its
-assets before using the RoboTwin evaluator. The presence of an evaluation script
-does not establish that the corresponding environment is ready to run.
-
-The primary implementation lives in `src/bridgewam`. The `fastwam` namespace and
-selected legacy model names remain available for checkpoint and configuration
-compatibility. They do not select a different implementation by themselves.
-
-## Repository layout
+The default model uses 32 Latent Bridge Queries (LBQs), a 30-layer Video DiT and a
+two-layer ActionDiT with alternating cross-attention and self-attention blocks.
 
 ```text
-configs/                         Model, dataset, training, and evaluation settings
-experiments/libero/               Standard LIBERO evaluation
-experiments/libero-plus/          LIBERO-Plus task manifests and sharded evaluation
-experiments/libero-pro/           LIBERO-Pro perturbation evaluation
-experiments/robotwin/             RoboTwin evaluation and policy adapters
-scripts/                         Training, preprocessing, and profiling utilities
-src/bridgewam/                   Models, datasets, runtime, and trainer
-src/fastwam/                     Legacy import compatibility
-src/latent_bridge_queries/       LBQ components
-third_party/RoboTwin/            Simulator placeholders; external setup required
+Training
+  scripts/train.py -> runtime.run_training -> BridgeWAMTrainer
+  configs/model/bridgewam.yaml -> models/wan22/factory.create_bridgewam
+  video + cached text + proprioception + action -> BridgeWAM.training_loss
+  Video DiT <-> LBQs -> ActionDiT -> video loss + action loss
+
+Action inference
+  observed images + language + proprioception
+  -> Video/LBQ prefill once -> fixed LBQ conditioning
+  -> iterative ActionDiT denoising -> normalized action chunk
+  -> benchmark processor -> physical action -> simulator
+
+Joint video/action inference
+  BridgeWAM.infer_joint -> repeated Video/LBQ and Action steps
+  -> video decoding + action chunk
 ```
 
-## Installation
+The main `BridgeOfExperts` class now implements the backbone directly as an
+`nn.Module` in `bridge_of_experts.py`. There is no `mot.py` superclass, direct
+Video-to-Action K/V path, disabled-LBQ baseline, or separate FastWAM model package.
+The underlying Wan numerical components remain shared because BridgeWAM uses them.
+The main action-only path does not generate future video. IDM and Joint ablations
+have their own explicitly implemented future-video inference paths.
 
-Training and simulation evaluation target Linux with NVIDIA GPUs. Install a
-compatible NVIDIA driver, Conda, `tmux`, and the `flock` utility. The dependency
-pins in `pyproject.toml` target Python 3.10 or later and PyTorch with CUDA 12.8.
+## Source layout
+
+```text
+configs/                           Training, data, model and simulation configs
+experiments/
+  libero/                          Standard LIBERO evaluator and manager
+  libero-plus/                     Perturbation evaluator and sharded manager
+  libero-pro/                      Pro task manifest, evaluator and manager
+  robotwin/bridgewam_policy/        RoboTwin policy adapter
+scripts/
+  train.py, train_zero1.sh, train_zero2.sh
+  precompute_text_embeds.py         Training text cache preparation
+  preprocess_action_dit_backbone.py Action backbone initialization
+  verify_bridgewam_refactor.py      Pinned-source numerical comparison
+  validation/                      CPU regression tests and fixture worker
+src/bridgewam/
+  runtime.py                       Dataset and training orchestration
+  trainer.py                       BridgeWAMTrainer and distributed checkpoints
+  models/wan22/
+    factory.py                     Main model factory
+    bridgewam.py                   Training, inference and checkpoint API
+    bridge_of_experts.py            Actual Video/LBQ/Action backbone
+    action_dit.py                   Action head
+    lbq/                           LBQ tokens and spectral regularization
+    ablation_bridgewam/            Four isolated ablation implementations
+    checkpoint_compat.py           Weight-name normalization only
+    helpers/, schedulers/          Wan loading and flow-matching schedules
+    wan_video_*.py                  Shared Video DiT, VAE and text encoder
+  datasets/lerobot/
+    backend/                       Embedded dataset reader implementation
+    processors/, transforms/, utils/
+third_party/RoboTwin/               Pinned placeholders; see simulator setup
+```
+
+The installable package contains only `src/bridgewam`; existing local datasets,
+weights, run artifacts and external environments are not packaged. Model and
+dataset components embedded inside `src/bridgewam` retain their original licenses.
+Only the supported training, evaluation and validation paths are included;
+private research scripts and generated figures are omitted.
+
+## Intentional API changes
+
+This is an API cleanup, not a drop-in replacement for old launcher commands.
+
+| Old entry | Current entry or policy |
+|---|---|
+| `fastwam.*` imports, `FastWAM*` classes and legacy factories | Removed; use `bridgewam.*` |
+| `model=fastwam*`, baseline/standalone Joint and IDM tasks | Removed; use an explicit retained LBQ task |
+| `bridgewam.runtime.create_bridgewam` | `bridgewam.models.wan22.factory.create_bridgewam` |
+| `mot_checkpoint_mixed_attn` | `checkpoint_attention` |
+| `model.mot` as the working interface | `model.bridge`; old storage names remain for weights |
+| Standalone `latent_bridge_queries` package | `bridgewam.models.wan22.lbq` |
+| `datasets/lerobot/lerobot` | `datasets/lerobot/backend` |
+| Standalone Wan model and generic `run_inference` | Removed; use `infer_action` or `infer_joint` |
+| `model.infer` and unused `_predict_action_noise` helper | Removed; the trainer calls `infer_joint` directly |
+| `FASTWAM_*` launcher variables and old policy adapter | Removed; use `BRIDGEWAM_*` and `bridgewam_policy` |
+| Old synthetic MoT profiling script | Removed; use evaluator inference profiling |
+
+An old saved Hydra config must be updated to the current factory and option names.
+Use the current task YAML files and supply the previous checkpoint as `resume` or
+`ckpt`; do not blindly instantiate a historical `_target_` path.
+
+Unsupported CFG parameters are now rejected: use `text_cfg_scale=1` and an empty
+`negative_prompt`. Wan2.2 input encoding requires `tiled=false`. An unimplemented
+attention-mode switch and unreachable code after errors were removed. Dataset
+backend validation still rejects unsupported data types and invalid episode
+indices; these checks are not unfinished training functions.
+
+## Checkpoint contract
+
+The live implementation uses `model.bridge`. To preserve checkpoint keys and
+optimizer parameter order, the backbone is still registered as `mot` and `dit`,
+and its historical `action_video_kv_layer_mask` buffer is retained. This buffer
+has no direct-Video routing implementation behind it. Existing `mixtures.video`,
+`mixtures.action` and LBQ tensor keys are unchanged.
+
+`checkpoint_compat.py` still recognizes old weight-wrapper names, including
+`fastwam`, and old LBQ metadata spellings. The Frozen Video ablation retains its
+historical `video_source` identity string so its verified checkpoints remain
+loadable. These are serialized data contracts, not FastWAM model code, imports,
+classes, environment-variable aliases or a baseline fallback.
+
+Checkpoint filenames do not need renaming. Weights must match the selected
+BridgeWAM topology and ablation identity. The loader continues to reject missing,
+conflicting or incompatible parameters and metadata. Loading a two-layer LBQ
+checkpoint does not reconstruct a different baseline architecture.
+
+- `resume=/path/to/step.pt`: load model weights and start a fresh optimizer.
+- `resume=/path/to/checkpoints/state/step_xxxxxx`: use the existing
+  Accelerate/DeepSpeed full-state restore, subject to its original distributed
+  topology and metadata requirements.
+- `model.load_checkpoint(path, optimizer=optimizer)`: restore compatible model
+  weights and a saved optimizer. Small CPU AdamW continuation is regression-tested.
+
+Old full-model Python pickles and old Python import paths are intentionally no
+longer supported. Use the project's weight-dictionary checkpoint format.
+
+## Environment and assets
+
+Use the verified Linux/CUDA environment for full training. The package keeps the
+pinned training dependencies from the reference version; the package name is
+`bridgewam`, and the wheel contains only the `bridgewam` namespace.
 
 ```bash
 conda create -n bridgewam python=3.10 -y
 conda activate bridgewam
-python -m pip install --upgrade pip
-python -m pip install -e . --extra-index-url https://download.pytorch.org/whl/cu128
-```
-
-Run the following setup and subsequent commands from the repository root:
-
-```bash
-export CODE_ROOT="$PWD"
-export PYTHONPATH="$CODE_ROOT/src:$CODE_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-export BRIDGEWAM_PYTHON="$(command -v python)"
-export DIFFSYNTH_MODEL_BASE_PATH="$CODE_ROOT/checkpoints"
-export BRIDGEWAM_TRAIN_OUTPUT_BASE="$CODE_ROOT/runs/train"
-export WANDB_MODE=disabled
-```
-
-W&B logging is disabled in the default training configuration. Enable it only
-after configuring your own account; do not publish logs or account metadata as
-part of an anonymous source submission.
-
-## Pretrained models and data
-
-### Model components
-
-Prepare the Wan2.2-TI2V-5B backbone, compatible VAE, text encoder, and tokenizer.
-With the default `model.redirect_common_files=true`, the loader expects the
-following structure under `DIFFSYNTH_MODEL_BASE_PATH`:
-
-```text
-checkpoints/
-|-- Wan-AI/Wan2.2-TI2V-5B/
-|   `-- diffusion_pytorch_model*.safetensors
-|-- Wan-AI/Wan2.1-T2V-1.3B/google/umt5-xxl/
-`-- DiffSynth-Studio/Wan-Series-Converted-Safetensors/
-    |-- Wan2.2_VAE.safetensors
-    `-- models_t5_umt5-xxl-enc-bf16.safetensors
-```
-
-The loader supports downloading missing upstream components. For an offline run,
-prepare every required component first, then set:
-
-```bash
+pip install -U pip
+pip install -e . --extra-index-url https://download.pytorch.org/whl/cu128
+export PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
+export DIFFSYNTH_MODEL_BASE_PATH=/path/to/checkpoints
 export DIFFSYNTH_SKIP_DOWNLOAD=true
+export BRIDGEWAM_DATA_ROOT=/path/to/data
+export BRIDGEWAM_TRAIN_OUTPUT_BASE=/path/to/training-results
 ```
 
-Create the interpolated ActionDiT backbone with the base model configuration,
-which retains the full layer stack needed by the preprocessing utility:
+Provide the matching Wan Video DiT, VAE, tokenizer and optional T5 weights.
+`DIFFSYNTH_SKIP_DOWNLOAD=true` requires these files to exist locally. Dataset paths
+are relative to `BRIDGEWAM_DATA_ROOT` (default `./data`). Output defaults are local
+`runs/` directories instead of hard-coded server locations. Review
+`configs/data/*.yaml` for camera layout, action/state dimensions, dataset paths,
+normalization statistics and the text cache path.
+
+Before training, prepare the ActionDiT backbone and text embeddings:
 
 ```bash
 python scripts/preprocess_action_dit_backbone.py \
   --model-config configs/model/bridgewam.yaml \
   --output "$DIFFSYNTH_MODEL_BASE_PATH/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt" \
-  --device cuda \
-  --dtype bfloat16
+  --device cuda --dtype bfloat16
 
-export ACTION_DIT_PRETRAINED_PATH="$DIFFSYNTH_MODEL_BASE_PATH/ActionDiT_linear_interp_Wan22_alphascale_1024hdim.pt"
+python scripts/precompute_text_embeds.py \
+  task=libero_uncond_2cam224_lbqs_only_2layer_alternating_cross_self_fullfinetune_1e-4 \
+  data.train.text_embedding_cache_dir=/path/to/text-cache/libero
 ```
 
-### Dataset layout
+Existing pretrained ActionDiT backbone files can be reused. The main model's
+configured two Action layers retain the original source-layer mapping.
 
-Use datasets compatible with the included LeRobot-based loader and processing
-configurations. The default paths are relative to the repository root:
+## Training
 
-```text
-data/
-|-- libero_mujoco3.3.2/
-|   |-- libero_spatial_no_noops_lerobot/
-|   |-- libero_object_no_noops_lerobot/
-|   |-- libero_goal_no_noops_lerobot/
-|   `-- libero_10_no_noops_lerobot/
-|-- robotwin2.0/
-|   |-- robotwin2.0/              # Dataset containing data/, meta/, and videos/
-|   `-- dataset_stats.json
-`-- text_embeds_cache/
-    |-- libero/
-    `-- robotwin/
-```
-
-Override `data.train.dataset_dirs` and the corresponding validation paths when
-using a different location. Keep action/state normalization statistics paired
-with the dataset and checkpoint that produced them.
-
-The main training task uses cached text embeddings instead of loading the text
-encoder in each training process. Generate the cache after installing the data
-and model components:
+The `train` configuration defaults to the main LIBERO LBQ task. For eight GPUs:
 
 ```bash
-TASK=libero_uncond_2cam224_lbqs_only_2layer_alternating_cross_self_fullfinetune_1e-4
-python scripts/precompute_text_embeds.py task="$TASK"
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+  bash scripts/train_zero1.sh 8 \
+    task=libero_uncond_2cam224_lbqs_only_2layer_alternating_cross_self_fullfinetune_1e-4 \
+    data.train.text_embedding_cache_dir=/path/to/text-cache/libero
 ```
 
-## Main LIBERO training configuration
+The launcher uses tmux by default. Set `BRIDGEWAM_TMUX_DISABLED=1` for foreground
+execution and `BRIDGEWAM_TMUX_SESSION_NAME` to select a session name. `RUN_ID`,
+`NNODES`, `NODE_RANK`, `MASTER_ADDR` and `MASTER_PORT` keep their existing roles.
+The launchers and Python training/preprocessing CLIs prepend this checkout's
+`src` directory, preventing accidental imports from another installation.
 
-The main task above uses the following settings:
+Retained LIBERO tasks are the main task above, its spectral regularization task
+`libero_uncond_2cam224_lbqs_spectral_2layer_fullfinetune_1e-4`, and the four tasks in
+the [ablation guide](src/bridgewam/models/wan22/ablation_bridgewam/README.md).
+`robotwin_bridgewam_3cam384_lbq32_2layer_1e-4` combines the same BridgeWAM LBQ
+architecture with the existing RoboTwin data contract. This new RoboTwin task is
+structurally checked; no new RoboTwin training result is claimed.
 
-| Component | Configuration |
-|---|---|
-| Video backbone | Wan2.2-TI2V-5B, 30 layers, hidden dimension 3072 |
-| Action head | Two alternating cross-attention/self-attention layers, hidden dimension 1024 |
-| Bridge queries | 32 LBQs, introduced at layer 0, read out at the final video layer |
-| LBQ routing | `lbq_only`, bidirectional attention, identity RoPE |
-| Video coupling | `future_video_reads_lbq` |
-| Optimizer schedule | Learning rate `1e-4`, cosine schedule, 10 epochs |
-| Batch size | 16 per process, gradient accumulation 1 |
+## Simulation evaluation
 
-At training initialization, the Video DiT loads pretrained Wan weights and the
-ActionDiT backbone loads the preprocessed weights. LBQs and task-specific
-adapters are newly initialized. The VAE is frozen. The main task fine-tunes the
-video and action experts; frozen-video, joint, and IDM variants are separate tasks.
-
-```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export RUN_ID="bridgewam_libero_$(date +%Y%m%d_%H%M%S)"
-export BRIDGEWAM_TMUX_SESSION_NAME="$RUN_ID"
-
-bash scripts/train_zero1.sh 8 \
-  task="$TASK" \
-  seed=42 \
-  num_workers=8 \
-  save_every=5000 \
-  model.skip_dit_load_from_pretrain=false \
-  model.latent_bridge_queries.num_lbqs=32 \
-  model.latent_bridge_queries.start_layer=0 \
-  model.latent_bridge_queries.readout_layer=-1
-```
-
-The launcher creates a detached tmux session and prints the log location. Unless
-`output_dir` is explicitly overridden, artifacts are written to:
-
-```text
-runs/train/<task>/<run_id>/
-|-- train.log
-|-- dataset_stats.json
-`-- checkpoints/weights/step_<number>.pt
-```
-
-Set `BRIDGEWAM_TMUX_DISABLED=1` for foreground training. Legacy `FASTWAM_*`
-launcher variables remain supported, with `BRIDGEWAM_*` taking precedence.
-
-## Evaluation
-
-Use the same model architecture as the checkpoint's training configuration.
-Prepare a checkpoint and its matching statistics, then set:
-
-```bash
-export CKPT=/path/to/checkpoint.pt
-export STATS=/path/to/dataset_stats.json
-export MUJOCO_GL=egl
-export PYOPENGL_PLATFORM=egl
-export NVIDIA_DRIVER_CAPABILITIES=all
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-TASK=libero_uncond_2cam224_lbqs_only_2layer_alternating_cross_self_fullfinetune_1e-4
-```
-
-The examples below start with one worker per GPU. Increase
-`MULTIRUN.max_tasks_per_gpu` only after confirming sufficient GPU and host memory.
-Each worker loads its own model. Allocate resources before starting another
-benchmark; these managers are not a general cross-benchmark GPU scheduler.
-
-### LIBERO
-
-Install a compatible [LIBERO environment](https://github.com/Lifelong-Robot-Learning/LIBERO)
-and configure its BDDL files, initial states, and assets. Point the import path and
-`LIBERO_CONFIG_PATH` at that installation, not at a Plus or Pro installation.
+Install each matching simulator environment separately and provide its resources.
+For standard LIBERO:
 
 ```bash
 export LIBERO_ROOT=/path/to/LIBERO
-export LIBERO_CONFIG_PATH=/path/to/libero-config
-export PYTHONPATH="$CODE_ROOT/src:$CODE_ROOT:$LIBERO_ROOT"
+export BRIDGEWAM_PYTHON="$(command -v python)"
+export PYTHONPATH="$PWD/src:$PWD:$LIBERO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 python experiments/libero/run_libero_manager.py \
-  task="$TASK" \
-  ckpt="$CKPT" \
-  EVALUATION.dataset_stats_path="$STATS" \
-  EVALUATION.output_dir="$CODE_ROOT/runs/eval/libero/$(date +%Y%m%d_%H%M%S)" \
-  EVALUATION.num_trials=50 \
-  model.skip_dit_load_from_pretrain=true \
-  MULTIRUN.num_gpus=8 \
-  MULTIRUN.max_tasks_per_gpu=1
+  task=libero_uncond_2cam224_lbqs_only_2layer_alternating_cross_self_fullfinetune_1e-4 \
+  ckpt=/path/to/step.pt \
+  EVALUATION.dataset_stats_path=/path/to/dataset_stats.json \
+  EVALUATION.output_dir=/path/to/libero-evaluation \
+  MULTIRUN.num_gpus=8
 ```
 
-The default selection contains four suites with ten tasks each. The manager
-waits for its workers; run the manager inside tmux if it must survive a disconnect.
+Use an environment configuration pointing to the matching LIBERO BDDL, initial
+states and assets. The managers do not download these resources.
 
-### LIBERO-Plus
+- [LIBERO-Plus](experiments/libero-plus/README.md): pass
+  `LIBERO_PLUS.repo_path=/path/to/LIBERO-plus`.
+- [LIBERO-Pro](experiments/libero-pro/README.md): set
+  `LIBERO_PRO_REPO=/path/to/LIBERO-PRO` or pass `LIBERO_PRO.repo_path`.
+- RoboTwin: use `experiments/robotwin/run_robotwin_manager.py`, the new RoboTwin
+  task above, and matching checkpoint/statistics files.
 
-Install the separate LIBERO-Plus environment and its additional dependencies.
-The stage launcher requires the full 10,030-task selection by default and starts
-a detached manager. Each task uses one trial.
+**RoboTwin source limitation:** the reference commit contains 1,037 empty regular
+files under `third_party/RoboTwin`. This working tree preserves local simulator
+files and asset links, replacing only the old policy symlink with a relative
+`bridgewam_policy` link. The locally inspected simulator files are also empty. Restore
+the verified simulator code and assets before running evaluation. In particular,
+the manager requires `third_party/RoboTwin/task_config/_eval_step_limit.yml`;
+changing only the worker's `EVALUATION.robotwin_root` does not relocate that file.
+
+For real action-inference timing, use `EVALUATION.profile_inference=true` in the
+LIBERO evaluator. This measures the executed model path, including its single LBQ
+prefill, instead of constructing an unrelated baseline for profiling.
+
+## Verification
+
+The refactor is checked against the pinned source with tiny CPU models across
+main, spectral, Frozen Video, LBQ-K/V, IDM and Joint paths, with gradient
+checkpointing both enabled and disabled. The 12 cases compare exact tensor values:
+initial/restored weights, loss, gradients, parameter order, action/joint inference,
+optimizer updates and continuation from a reference AdamW checkpoint.
+VAE encoding/decoding is substituted with fixed latents in that comparison.
 
 ```bash
-bash experiments/libero-plus/run_stage1.sh \
-  LIBERO_PLUS.repo_path=/path/to/LIBERO-plus \
-  task="$TASK" \
-  ckpt="$CKPT" \
-  EVALUATION.dataset_stats_path="$STATS" \
-  EVALUATION.output_dir="$CODE_ROOT/runs/eval/libero-plus/$(date +%Y%m%d_%H%M%S)" \
-  EVALUATION.num_trials=1 \
-  model.skip_dit_load_from_pretrain=true \
-  MULTIRUN.tasks_per_worker=50 \
-  MULTIRUN.num_gpus=8 \
-  MULTIRUN.max_tasks_per_gpu=1
+pip install pytest pytest-subtests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/src:$PWD" \
+  python -m pytest -q -p no:cacheprovider tests scripts/validation
+
+python scripts/verify_bridgewam_refactor.py \
+  --reference-repo=/path/to/reference-repository \
+  --reference-ref=YOUR_REFERENCE_REVISION
 ```
 
-See the [LIBERO-Plus guide](experiments/libero-plus/README.md) for manifests,
-diagnostic subsets, environment isolation, and summary files.
+An additional CPU smoke test executes DataLoader -> real `build_inputs` -> loss ->
+Accelerate backward -> optimizer update -> checkpoint save, with synthetic
+observations and a tiny VAE stand-in. Trainer logging now handles a missing
+DeepSpeed plugin when using ordinary CPU/single-process Accelerate.
 
-### LIBERO-Pro
+The original `tests/` suite is migrated to the canonical BridgeWAM API. Tests for
+removed baseline routing, legacy imports and full-model pickle aliases are retired;
+LIBERO-Pro tests are consolidated under `scripts/validation`. The suite retains
+weight-wrapper/MetaQuery compatibility, strict rejection, optimizer continuation,
+spectral gradients and attention-pruning coverage.
 
-Prepare an external LIBERO-Pro checkout with all BDDL files, initial states, and
-assets. The current evaluator reads resources from that checkout; it does not
-generate perturbed environments. Keep the same resource variant across models.
+The CPU tests also cover every retained model factory, default LBQ configurations,
+one prefill per action chunk, explicit unsupported-option errors, historical weight
+names, and the LIBERO-Pro manifest/worker/summary interface. This does not establish
+full-checkpoint CUDA restoration, multi-GPU training, distributed resume or real
+simulator success rates. No pretrained model or simulator assets are bundled.
 
-```bash
-export LIBERO_PRO_REPO=/path/to/LIBERO-PRO
+## Attribution
 
-python experiments/libero-pro/run_libero_pro_manager.py \
-  task="$TASK" \
-  ckpt="$CKPT" \
-  EVALUATION.dataset_stats_path="$STATS" \
-  EVALUATION.output_dir="$CODE_ROOT/runs/eval/libero-pro/$(date +%Y%m%d_%H%M%S)" \
-  EVALUATION.num_trials=50 \
-  model.skip_dit_load_from_pretrain=true \
-  'LIBERO_PRO.perturbations=[environment,position,object,language,task]' \
-  LIBERO_PRO.expected_num_tasks=200 \
-  MULTIRUN.num_gpus=8 \
-  MULTIRUN.max_tasks_per_gpu=1
-```
+BridgeWAM builds on the upstream Wan, Fast-WAM and LeRobot components. Original
+copyright headers and `LICENSE` are retained. Upstream model/data identifiers and
+copyright attribution are not model compatibility interfaces:
 
-This manager runs in the foreground; use tmux for persistent execution. See the
-[LIBERO-Pro guide](experiments/libero-pro/README.md) for task planning, resource
-validation, episode horizons, and completeness checks.
-
-### RoboTwin
-
-Restore the complete simulator under `third_party/RoboTwin` before running
-`experiments/robotwin/run_robotwin_manager.py`. In particular, the manager reads
-`third_party/RoboTwin/task_config/_eval_step_limit.yml` from this checkout even
-when `EVALUATION.robotwin_root` is overridden. Follow the upstream
-[RoboTwin installation instructions](https://github.com/RoboTwin-Platform/RoboTwin)
-for assets and simulation dependencies.
-
-Select a task and overrides matching the RoboTwin checkpoint. Do not use a
-LIBERO checkpoint or assume that the baseline RoboTwin task enables the two-layer
-LBQ architecture. See `configs/sim_robotwin.yaml` for evaluation settings,
-including episode count and instruction type.
-
-## Checkpoint compatibility and result integrity
-
-- Legacy import and state-dictionary names are supported where implemented in
-  `src/bridgewam/_legacy_imports.py` and
-  `src/bridgewam/models/wan22/checkpoint_compat.py`.
-- Compatibility does not make different query counts, layer counts, readout
-  layers, action dimensions, or model variants interchangeable.
-- `model.skip_dit_load_from_pretrain=true` skips backbone preloading during
-  evaluation; the trained checkpoint must then restore the required weights.
-  It does not mean that random backbone weights are intended for evaluation.
-- Use a fresh output directory for each checkpoint/configuration pair. A summary
-  file or a live tmux session alone does not prove a complete evaluation. Check
-  worker errors, expected task counts, result coverage, and manager exit status.
-- `scripts/verify_bridgewam_migration.py` requires a separate repository with
-  suitable Git history and an explicit `--reference`; it is not a standalone
-  checkpoint or simulator validation test.
-
-## Anonymous distribution
-
-Distribute only reviewed source files. Git history, remotes, credentials, local
-configuration, training logs, checkpoint metadata, and generated outputs may
-contain identifying information and must be reviewed separately. `.gitignore`
-does not remove files already committed to history. Avoid adding personal
-accounts, institution-specific paths, tracking badges, or author-profile links.
-
-## License and third-party components
-
-See [LICENSE](LICENSE). This implementation builds on FastWAM and uses components
-from Wan/DiffSynth, LeRobot, and the supported simulation benchmarks. Existing
-third-party copyright and license notices are retained; they describe upstream
-provenance and are not a declaration of this submission's authorship. External
-code, datasets, and model weights remain subject to their respective licenses.
+- [Upstream model resources](https://huggingface.co/yuanty/fastwam)
+- [LIBERO data](https://huggingface.co/datasets/yuanty/LIBERO-fastwam)
+- [RoboTwin data](https://huggingface.co/datasets/yuanty/robotwin2.0-fastwam)

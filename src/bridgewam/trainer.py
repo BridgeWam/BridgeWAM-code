@@ -25,7 +25,7 @@ from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_s
 logger = get_logger(__name__)
 
 
-class Wan22Trainer:
+class BridgeWAMTrainer:
     def __init__(self, model, train_dataset, val_dataset=None, *, cfg: DictConfig):
         self.model = model
         self.train_dataset = train_dataset
@@ -62,10 +62,13 @@ class Wan22Trainer:
             step_scheduler_with_optimizer=False,
         )
         
+        plugin = self.accelerator.state.deepspeed_plugin
+        zero_stage = (plugin.deepspeed_config.get("zero_optimization", {}).get("stage", "unknown")
+                      if plugin is not None else "disabled")
         logger.info(
             "Accelerate training: distributed_type=%s zero_stage=%s world_size=%d process_index=%d cfg_mixed_precision=%s accelerator_mixed_precision=%s grad_accum=%d grad_clip=%.4f",
             self.accelerator.distributed_type,
-            self.accelerator.state.deepspeed_plugin.deepspeed_config.get("zero_optimization", {}).get("stage", "unknown"),
+            zero_stage,
             self.accelerator.num_processes,
             self.accelerator.process_index,
             self.mixed_precision,
@@ -543,12 +546,11 @@ class Wan22Trainer:
         # 2. inference and video saving
         infer_kwargs = {
             "input_image": input_image,
-            "num_frames": num_frames,
+            "num_video_frames": num_frames,
             "action": action,
             "action_horizon": sample['action_horizon'],
             "proprio": proprio,
             "text_cfg_scale": 1.0,
-            "action_cfg_scale": 1.0,
             "num_inference_steps": self.eval_num_inference_steps,
             "seed": 42,
             "tiled": False,
@@ -560,7 +562,7 @@ class Wan22Trainer:
         else:
             infer_kwargs["prompt"] = prompt
 
-        pred = model.infer(
+        pred = model.infer_joint(
             **infer_kwargs,
         )
         
@@ -720,7 +722,7 @@ class Wan22Trainer:
             "epoch": int(self.epoch),
             "batch_in_epoch": int(self.batch_in_epoch),
             "action_dit_architecture": model.action_expert.architecture_config(),
-            "latent_bridge_queries": model.mot.latent_bridge_queries_config(),
+            "latent_bridge_queries": model.bridge.latent_bridge_queries_config(),
         }
         with open(state_file, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=True, indent=2)
@@ -750,7 +752,7 @@ class Wan22Trainer:
             with open(state_file, "r", encoding="utf-8") as f:
                 payload = json.load(f)
         model = self.accelerator.unwrap_model(self.model)
-        current_lbq_config = model.mot.latent_bridge_queries_config()
+        current_lbq_config = model.bridge.latent_bridge_queries_config()
         if current_lbq_config is not None:
             if payload is None or int(payload.get("checkpoint_format_version", 0)) < 2:
                 raise ValueError(
@@ -860,7 +862,7 @@ class Wan22Trainer:
                         global_loss_metrics[key] = float(
                             self.accelerator.gather(metric_tensor).mean().item()
                         )
-                    grad_norm_tensor = torch.tensor(grad_norm, device=loss.device, dtype=torch.float32)
+                    grad_norm_tensor = torch.as_tensor(grad_norm, device=loss.device, dtype=torch.float32).detach()
                     global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
 
                     current_lr = float(self.optimizer.param_groups[0]["lr"])

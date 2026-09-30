@@ -163,7 +163,7 @@ def main(cfg: DictConfig):
         raise FileNotFoundError(f"RoboTwin root not found: {robotwin_root}")
 
     policy_name = str(cfg.EVALUATION.policy_name)
-    if policy_name not in {"bridgewam_policy", "fastwam_policy"}:
+    if policy_name != "bridgewam_policy":
         raise ValueError(f"Unsupported BridgeWAM policy name: {policy_name}")
     policy_source_dir = (PROJECT_ROOT / "experiments" / "robotwin" / policy_name).resolve()
     if not policy_source_dir.is_dir():

@@ -6,10 +6,10 @@ defaults:
   - _self_
 
 model:
-  mot_checkpoint_mixed_attn: false
+  checkpoint_attention: false
   ablation:
     type: frozen_video_action_reader
-    release_checkpoint_path: ${oc.env:BRIDGEWAM_RELEASE_CKPT,${oc.env:FASTWAM_RELEASE_CKPT,./checkpoints/fastwam_release/libero_uncond_2cam224.pt}}
+    release_checkpoint_path: ${oc.env:BRIDGEWAM_RELEASE_CKPT,null}
   latent_bridge_queries:
     generation_coupling: none
     injection_mode: lbq_only

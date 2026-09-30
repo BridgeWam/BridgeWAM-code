@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "bridgewam"
 version = "0.1.0"
-description = "BridgeWAM: video/action training and inference with LBQ bridges and MoT baselines"
+description = "BridgeWAM: video/action training and inference through Latent Bridge Queries"
 requires-python = ">=3.10"
 dependencies = [
   "accelerate==1.12.0",
@@ -45,4 +45,4 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["bridgewam*", "fastwam*", "latent_bridge_queries*"]
+include = ["bridgewam*"]

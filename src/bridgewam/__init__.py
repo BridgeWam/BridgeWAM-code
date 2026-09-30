@@ -1,11 +1,9 @@
-"""BridgeWAM training and inference package."""
-
-__all__ = ["BridgeWAM", "BridgeWAMJoint", "BridgeWAMIDM"]
+"""BridgeWAM training and simulation evaluation."""
+__all__ = ["BridgeWAM"]
 
 
 def __getattr__(name):
-    if name in __all__:
-        from importlib import import_module
-        suffix = {"BridgeWAM": "", "BridgeWAMJoint": "_joint", "BridgeWAMIDM": "_idm"}[name]
-        return getattr(import_module("bridgewam.models.wan22.bridgewam" + suffix), name)
+    if name == "BridgeWAM":
+        from .models.wan22.bridgewam import BridgeWAM
+        return BridgeWAM
     raise AttributeError(name)

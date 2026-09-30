@@ -11,17 +11,13 @@ from bridgewam.utils.logging_config import get_logger
 logger = get_logger(__name__)
 
     
-def flash_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, ctx_mask: Optional[torch.Tensor] = None, compatibility_mode=True):
-    if compatibility_mode:
-        q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
-        k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
-        v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
-        x = F.scaled_dot_product_attention(q, k, v, attn_mask=ctx_mask)
-        x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
-        return x
-    else:
-        raise NotImplementedError("Only compatibility mode is implemented for flash attention. Please set compatibility_mode=True.")
-
+def multihead_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, num_heads: int, ctx_mask: Optional[torch.Tensor] = None):
+    """Multi-head attention using PyTorch scaled_dot_product_attention."""
+    q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
+    k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
+    v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
+    x = F.scaled_dot_product_attention(q, k, v, attn_mask=ctx_mask)
+    return rearrange(x, "b n s d -> b s (n d)")
 
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor):
@@ -164,7 +160,7 @@ class AttentionModule(nn.Module):
         self.num_heads = num_heads
         
     def forward(self, q, k, v, ctx_mask=None):
-        x = flash_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=ctx_mask)
+        x = multihead_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=ctx_mask)
         return x
 
 
@@ -191,7 +187,7 @@ class SelfAttention(nn.Module):
         v = self.v(x)
         q = rope_apply(q, freqs, self.num_heads)
         k = rope_apply(k, freqs, self.num_heads)
-        x = flash_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=self_attn_mask)
+        x = multihead_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=self_attn_mask)
         return self.o(x)
 
 
@@ -216,7 +212,7 @@ class CrossAttention(nn.Module):
         q = self.norm_q(self.q(x))
         k = self.norm_k(self.k(ctx))
         v = self.v(ctx)
-        x = flash_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=ctx_mask)
+        x = multihead_attention(q=q, k=k, v=v, num_heads=self.num_heads, ctx_mask=ctx_mask)
         return self.o(x)
 
 
@@ -549,9 +545,7 @@ class WanVideoDiT(torch.nn.Module):
             t = self.time_embedding(token_t_emb).reshape(batch_size, -1, self.hidden_dim)
             t_mod = self.time_projection(t).unflatten(2, (6, self.hidden_dim))
         else:
-            raise NotImplementedError("Only support seperated_timestep with fuse_vae_embedding_in_latents for now.")
-            t = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, timestep))
-            t_mod = self.time_projection(t).unflatten(1, (6, self.hidden_dim))
+            raise ValueError("BridgeWAM Video DiT requires seperated_timestep=true and fuse_vae_embedding_in_latents=true.")
         x = self.patchify(x, control_camera_latents_input=control_camera_latents_input)
         f, h, w = x.shape[2:]
 
