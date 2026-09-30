@@ -1,5 +1,7 @@
 # BridgeWAM
 
+[🤗 Hugging Face Models](https://huggingface.co/BridgeWAM/bridgewam)
+
 ![BridgeWAM overview](bridgewam-teaser.png)
 
 BridgeWAM connects pretrained video and action experts through Latent Bridge
